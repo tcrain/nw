@@ -1,3 +1,4 @@
+mod errors;
 mod log;
 mod verification;
 
