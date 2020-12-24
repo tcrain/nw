@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 mod errors;
 mod log;
 mod verification;
