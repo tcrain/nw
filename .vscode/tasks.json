@@ -10,5 +10,15 @@
 			"group": "build",
 			"label": "Rust: cargo build - nw"
 		},
-	]
+		{
+			"type": "cargo",
+			"command": "test",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "test",
+			"label": "Rust: cargo test - nw"
+		},
+	],
+	
 }

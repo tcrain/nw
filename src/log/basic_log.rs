@@ -209,8 +209,6 @@ struct OuterOp {
     op: Op,
     // hash: Hash,
     // verification: Verify,
-    prev_op_total_order: Option<LogEntryWeak>,
-    next_op_total_order: Option<LogEntryWeak>,
 }
 
 fn drop_entry(entry: &LogEntryStrong) {
@@ -271,8 +269,6 @@ struct OuterSp {
     not_included_ops: Vec<LogEntryWeak>,
     // last_op: LogEntryWeak,
     prev_sp: Option<LogEntryWeak>,
-    prev_sp_total_order: Option<LogEntryWeak>,
-    next_sp_total_order: Option<LogEntryWeak>,
 }
 
 fn set_next_sp(prev_sp: &LogEntryStrong, old_next_sp: Option<&LogEntryStrong>, new_next: &LogEntryStrong) {
@@ -621,8 +617,6 @@ impl Log {
     fn new_op(&mut self, op: Op) -> LogEntryStrong {
         self.index += 1;
         let outer_op = PrevEntry::Op(OuterOp{
-            prev_op_total_order: None,
-            next_op_total_order: None,
             op,
             log_index: self.index,
         });
@@ -866,8 +860,6 @@ mod tests {
             sp: Sp::new(id, prev_sp_hash),
             not_included_ops: vec![],
             prev_sp: None,
-            prev_sp_total_order: None,
-            next_sp_total_order: None,
         }
     }
 }
