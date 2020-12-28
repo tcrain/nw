@@ -1,3 +1,3 @@
 mod op;
 mod sp;
-mod log;
+mod basic_log;

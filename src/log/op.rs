@@ -7,13 +7,13 @@ use crate::verification;
 const OP_LEN: usize = 5;
 pub type OpData = [u8; OP_LEN];
 
-fn gen_rand_data() -> OpData {
+pub fn gen_rand_data() -> OpData {
     let mut rng = thread_rng();
     rng.gen::<OpData>()
 }
-#[derive(Copy, Clone, Ord, Eq, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, Ord, Eq, PartialEq, PartialOrd)] // order first by time, then by ID, then by hash
 pub struct Op {
-    time: Time, // order first by time, then by ID, then by hash
+    time: Time, 
     id: Id,
     hash: Hash,
     data: OpData,
@@ -24,10 +24,10 @@ impl Op {
         let data = gen_rand_data();
         let hash = verification::hash(&data);
         Op{
-            id: id,
+            id,
             time: verification::now(),
-            hash: hash,
-            data: data,
+            hash,
+            data,
         }
     }
 }

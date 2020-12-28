@@ -6,5 +6,6 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogError{
-    EmptyLogError
+    EmptyLogError,
+    PrevSpNotFound
 }
