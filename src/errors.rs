@@ -6,6 +6,18 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogError{
+    SerializeError,
+    NoNewOps,
+    OpAlreadyExists,
     EmptyLogError,
-    PrevSpNotFound
+    PrevSpHasNoLastOp,
+    IdHasNoSp,
+    PrevSpNotFound,
+    NotEnoughOpsForSP,
+    SpHashNotComputed,
+    SpNoOpsSupported,
+    SpPrevLaterTime,
+    SpPrevIdDifferent,
+    SpInvalidInitHash,
+    SpArrivedEarly,
 }

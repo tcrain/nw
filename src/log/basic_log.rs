@@ -1,300 +1,14 @@
-use std::{cmp::Ordering, rc::{Rc, Weak}};
+use std::{cmp::Ordering, rc::{Rc}};
 use std::cell::{RefCell, Ref};
 use std::ops::Deref;
-use std::fmt::{Debug, Display, Formatter};
-use std::{fmt};
-use crate::{errors::{Error, LogError}, verification::Id};
+use verification::{TimeCheck, TimeInfo, hash};
 
-use super::{op::Op};
+use crate::{errors::{Error, LogError}, verification::{self, Id}};
+
+use super::{entry::{LogEntry, LogEntryStrong, LogEntryWeak, LogIterator, LogPointers, OuterOp, OuterSp, PrevEntry, TotalOrderIterator, TotalOrderPointers, drop_entry, prev_entry_strong_to_weak, set_next_sp, set_next_total_order}, op::{BasicInfo, EntryInfo, Op, OpState}, sp::SpState};
 use super::sp::Sp;
 
 // TODO: check equal when inserting, then don't insert
-
-struct LogEntry {
-    log_index: u64,
-    log_pointers: LogPointers,
-    entry: PrevEntry,
-    to_pointers: TotalOrderPointers,
-}
-
-impl Display for LogEntry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "log_index: {}, {}", self.log_index, self.log_pointers)
-    }
-}
-
-impl Debug for LogEntry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(&self, f)
-    }
-}
-
-impl LogEntry {
-    fn get_next(&self) -> Option<LogEntryStrong> {
-        self.log_pointers.get_next()
-    }
-    
-    fn set_next(&mut self, next: Option<LogEntryWeak>) {
-        self.log_pointers.next_entry = next;
-    }
-    
-    fn get_prev(&self) -> Option<LogEntryStrong> {
-        self.log_pointers.get_prev()
-    }
-    
-    fn set_prev(&mut self, prv: Option<LogEntryStrong>) {
-        self.log_pointers.prev_entry = prv;
-    }
-}
-
-enum PrevEntry {
-    Sp(OuterSp),
-    Op(OuterOp),
-}
-
-impl Debug for PrevEntry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(&self, f)
-    }
-}
-
-impl Display for PrevEntry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            PrevEntry::Sp(sp) => write!(f, "{}", sp),
-            PrevEntry::Op(op) => write!(f, "{}", op)
-        }
-    }
-}
-
-fn prev_entry_strong_to_weak(entry: Option<LogEntryStrong>) -> Option<LogEntryWeak> {
-    entry.map(|et| Rc::downgrade(&et))
-}
-
-impl Drop for PrevEntry {
-    fn drop(&mut self) {
-        println!("drop {}", self)
-    }
-}
-
-impl PrevEntry {
-    
-    fn mut_as_op(&mut self) -> &mut OuterOp {
-        match self {
-            PrevEntry::Sp(_) => panic!("expected op"),
-            PrevEntry::Op(op) => op
-        }
-    }
-    
-    fn as_op(&self) -> &OuterOp {
-        match self {
-            PrevEntry::Sp(_) => panic!("expected op"),
-            PrevEntry::Op(op) => op
-        }
-    }
-    
-    fn mut_as_sp(&mut self) -> &mut OuterSp {
-        match self {
-            PrevEntry::Sp(sp) => sp,
-            PrevEntry::Op(_) => panic!("expected sp"),
-        }
-    }
-    
-    fn as_sp(&self) -> &OuterSp {
-        match self {
-            PrevEntry::Sp(sp) => sp,
-            PrevEntry::Op(_) => panic!("expected sp"),
-        }
-    }        
-}
-
-type LogEntryStrong = Rc<RefCell<LogEntry>>;
-type LogEntryWeak = Weak<RefCell<LogEntry>>;
-
-struct TotalOrderPointers {
-    next_to: Option<LogEntryWeak>,
-    prev_to: Option<LogEntryWeak>,
-}
-
-impl TotalOrderPointers {
-    fn get_prev_to(&self) -> Option<LogEntryStrong> {
-        match &self.prev_to {
-            None => None,
-            Some(prv) => prv.upgrade()
-        }
-    }
-    
-    fn get_next_to(&self) -> Option<LogEntryStrong> {
-        match &self.next_to {
-            None => None,
-            Some(nxt) => nxt.upgrade()
-        }
-    }
-}
-
-fn set_next_total_order(prev: &LogEntryStrong, new_next: &LogEntryStrong) {
-    match prev.borrow().to_pointers.get_next_to() {
-        None => (),
-        Some(nxt) => {
-            new_next.borrow_mut().to_pointers.next_to = Some(Rc::downgrade(&nxt));
-            nxt.borrow_mut().to_pointers.prev_to = Some(Rc::downgrade(new_next))
-        }
-    };
-    new_next.borrow_mut().to_pointers.prev_to = Some(Rc::downgrade(prev));
-    prev.borrow_mut().to_pointers.next_to = Some(Rc::downgrade(new_next));
-}
-
-fn drop_item_total_order(item: &LogEntryStrong) {
-    let prev_to = item.borrow().to_pointers.get_prev_to();
-    let next_to = item.borrow().to_pointers.get_next_to();
-    match next_to.as_ref() {
-        Some(nxt) => {
-            match prev_to.as_ref() {
-                None => nxt.borrow_mut().to_pointers.prev_to = None,
-                Some(prv) => {
-                    nxt.borrow_mut().to_pointers.prev_to = Some(Rc::downgrade(prv));
-                    prv.borrow_mut().to_pointers.next_to = Some(Rc::downgrade(nxt))                
-                }
-            }
-        },
-        None => { // next is none
-            if let Some(prv) = prev_to.as_ref() {
-                prv.borrow_mut().to_pointers.next_to = None
-            }
-        }
-    }
-}
-
-struct LogPointers {
-    next_entry: Option<LogEntryWeak>,
-    prev_entry: Option<LogEntryStrong>,
-}
-
-impl Display for LogPointers {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let prv = match &self.prev_entry {
-            None => "None",
-            Some(_) => "Some",
-        };
-        let nxt = match &self.next_entry {
-            None => "None",
-            Some(ne) => {
-                match ne.upgrade() {
-                    None => "None",
-                    Some(_) => "Some"
-                }
-            },
-        };
-        write!(f, "prev_entry: {}, next_entry: {}", prv, nxt)
-    }
-}
-
-impl LogPointers {
-    fn get_next(&self) -> Option<LogEntryStrong> {
-        match self.next_entry.as_ref() {
-            None => None,
-            Some(nxt) => nxt.upgrade()
-        }
-    }
-    
-    fn get_prev(&self) -> Option<LogEntryStrong> {
-        self.prev_entry.as_ref().map(|prv| {
-            Rc::clone(prv)
-        })
-    }
-}
-
-struct OuterOp {
-    log_index: u64,
-    op: Op,
-    // hash: Hash,
-    // verification: Verify,
-}
-
-fn drop_entry(entry: &LogEntryStrong) {
-    drop_item_total_order(entry);
-    let (prev, next) = (entry.borrow().get_prev(), entry.borrow().get_next());
-    match next.as_ref() {
-        Some(nxt) => {
-            match prev.as_ref() {
-                None => nxt.borrow_mut().set_prev(None),
-                Some(prv) => {
-                    nxt.borrow_mut().set_prev(Some(Rc::clone(prv)));
-                    prv.borrow_mut().set_next(Some(Rc::downgrade(nxt)));
-                }
-            }
-        },
-        None => {
-            if let Some(prv) = prev.as_ref() {
-                prv.borrow_mut().set_next(None)
-            }
-        }
-    }
-}
-
-impl OuterOp {}
-
-impl PartialOrd for OuterOp {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OuterOp {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.log_index.cmp(&other.log_index) {
-            Ordering::Greater => Ordering::Greater,
-            Ordering::Less => Ordering::Less,
-            Ordering::Equal => self.op.cmp(&other.op)
-        }
-    }
-}
-
-impl Eq for OuterOp {}
-
-impl PartialEq for OuterOp {
-    fn eq(&self, other: &Self) -> bool {
-        self.op == other.op && self.log_index == other.log_index
-    }
-}
-
-impl Display for OuterOp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Op(log_index: {}, op: {})", self.log_index, self.op)
-    }
-}
-
-struct OuterSp {
-    sp: Sp,
-    not_included_ops: Vec<LogEntryWeak>,
-    // last_op: LogEntryWeak,
-    prev_sp: Option<LogEntryWeak>,
-}
-
-fn set_next_sp(prev_sp: &LogEntryStrong, old_next_sp: Option<&LogEntryStrong>, new_next: &LogEntryStrong) {
-    new_next.borrow_mut().entry.mut_as_sp().prev_sp = Some(Rc::downgrade(prev_sp));
-    match old_next_sp {
-        None => (),
-        Some(old_next) => {
-            old_next.borrow_mut().entry.mut_as_sp().prev_sp = Some(Rc::downgrade(new_next))
-        }
-    }
-}
-
-impl OuterSp {
-    fn get_prev_sp(&self) -> Option<LogEntryStrong> {
-        match &self.prev_sp {
-            None => None,
-            Some(prv) => prv.upgrade()
-        }
-    }
-}
-
-impl Display for OuterSp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "SP")
-    }
-}
 
 fn to_prev_entry_holder(prv: &LogEntryStrong) -> PrevEntryHolder {
     PrevEntryHolder{prv_entry: (&**prv).borrow()}
@@ -329,22 +43,6 @@ impl Iterator for SpIterator {
     }
 }
 
-struct TotalOrderIterator {
-    prev_entry: Option<LogEntryStrong>,
-}
-
-impl Iterator for TotalOrderIterator {
-    type Item = LogEntryStrong;
-    
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = self.prev_entry.as_ref().map(|prv| Rc::clone(prv));
-        self.prev_entry = match self.prev_entry.take() {
-            None => None,
-            Some(prv) => prv.borrow().to_pointers.get_prev_to()
-        };
-        ret
-    }
-}
 
 struct SpLocalTotalOrderIterator {
     id: Id,
@@ -356,30 +54,13 @@ impl Iterator for SpLocalTotalOrderIterator {
     
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(nxt) = self.iter.next() {
-            if nxt.borrow().entry.as_sp().sp.id == self.id {
-                return Some(nxt)
+            let nxt_ret = nxt.borrow();
+            let sp = &nxt_ret.entry.as_sp().sp;
+            if sp.sp.info.id == self.id && !sp.sp.is_init() {
+                return Some(Rc::clone(&nxt))
             }
         }
         None
-    }
-}
-
-struct LogIterator {
-    prv_entry: Option<LogEntryStrong>,
-}
-
-impl Iterator for LogIterator {
-    type Item = LogEntryStrong;
-    
-    fn next(&mut self) -> Option<Self::Item> {
-        let ret = self.prv_entry.as_ref().map(|prv| {
-            Rc::clone(prv)
-        });
-        self.prv_entry = match self.prv_entry.take() {
-            None => None,
-            Some(prv) => (& *prv).borrow().get_prev()
-        };
-        ret
     }
 }
 
@@ -485,23 +166,86 @@ struct LogMultiple {
     first_entry: LogEntryStrong
 }
 
-struct Log {
+pub struct Log {
     index: u64,
     first_last: LogItems,
     last_op_total_order: Option<LogEntryWeak>,
     last_sp: Option<LogEntryWeak>,
     last_sp_total_order: Option<LogEntryWeak>,
+    init_hash: verification::Hash,
+    init_sp: Option<LogEntryWeak>,
+    set_initial_sp_op: bool,
+    init_sp_entry_info: Option<EntryInfo>,
 }
 
 impl Log {
-    fn new() -> Log {
-        Log{
+    pub fn new() -> Log {
+        let mut l = Log{
             index: 0,
             first_last: LogItems::Empty,
             last_op_total_order: None,
             last_sp: None,
             last_sp_total_order: None,
+            init_hash: hash(b"initial state"), // TODO should allow this as input?
+            init_sp: None,
+            set_initial_sp_op: false,
+            init_sp_entry_info: None,
+        };
+        // insert the initial sp
+        let init_sp = OuterSp{
+            sp: SpState::from_sp(Sp::get_init(l.get_init_support())).unwrap(),
+            last_op: None,
+            not_included_ops: vec![],
+            prev_sp: None,    
+        };
+        l.init_sp_entry_info = Some(init_sp.sp.get_entry_info());
+        l.init_sp = Some(Rc::downgrade(&l.insert_outer_sp(init_sp)));
+        l
+    }
+
+    fn get_init_support(&self) -> EntryInfo {
+        EntryInfo{
+            basic: BasicInfo{
+                time: 0,
+                id: 0,
+            },
+            hash: self.init_hash,
         }
+    }
+    
+    pub fn get_initial_entry_info(&self) -> EntryInfo {
+        /*EntryInfo{
+            basic: BasicInfo{
+                time: 0,
+                id: 0,
+            },
+            hash: self.init_hash,
+        }*/
+        self.init_sp_entry_info.unwrap()
+    }
+    
+    pub fn get_last_sp_id(&self, id: Id) -> Result<LogEntryStrong, Error> {
+        for nxt_sp in self.sp_total_order_iterator() {
+            if nxt_sp.borrow().entry.as_sp().sp.sp.info.id == id && !nxt_sp.borrow().entry.as_sp().sp.sp.is_init() {
+                return Ok(nxt_sp)
+            }
+        }
+        Err(Error::LogError(LogError::IdHasNoSp))
+    }
+    
+    pub fn get_initial_sp(&self) -> Result<LogEntryStrong, Error> {
+        self.find_sp(self.get_initial_entry_info())
+    }
+    
+    fn find_sp(&self, to_find: EntryInfo) -> Result<LogEntryStrong, Error> {
+        for nxt_sp in self.sp_total_order_iterator() {
+            match nxt_sp.borrow().entry.as_sp().sp.get_entry_info().cmp(&to_find) {
+                Ordering::Less => break,
+                Ordering::Equal => return Ok(Rc::clone(&nxt_sp)),
+                Ordering::Greater => (),
+            }
+        }
+        Err(Error::LogError(LogError::PrevSpNotFound))
     }
     
     fn drop_first(&mut self) -> Result<LogEntryStrong, Error> {
@@ -541,11 +285,12 @@ impl Log {
             prev_entry: match &self.last_sp_total_order {
                 None => None,
                 Some(prv) => prv.upgrade()
-            }
+            },
+            forward: false,
         }
     }
     
-    fn sp_iterator(&self) -> SpIterator {
+    fn sp_iterator_from_last(&self) -> SpIterator {
         SpIterator{
             prev_entry: match &self.last_sp {
                 None => None,
@@ -554,25 +299,37 @@ impl Log {
         }
     }
     
-    fn op_total_order_iterator(&self) -> TotalOrderIterator {
+    fn op_total_order_iterator_from_last(&self) -> TotalOrderIterator {
         TotalOrderIterator{
             prev_entry: match &self.last_op_total_order {
                 None => None,
                 Some(prv) => prv.upgrade()
-            }
+            },
+            forward: false,
         }
     }
     
-    fn log_iterator(&self) -> LogIterator {
+    fn log_iterator_from_end(&self) -> LogIterator {
         self.first_last.log_iterator()
     }
     
-    fn check_sp(&self, _sp: Sp) -> Result<OuterSp, Error> {
-        Err(Error::LogError(LogError::PrevSpNotFound))
+    pub fn check_sp<T>(&self, sp: Sp, included: &[EntryInfo], not_included: &[EntryInfo], ti: &T) -> Result<OuterSp, Error>
+    where T: TimeInfo {
+        sp.validate(&self.init_sp_entry_info.unwrap().hash, ti)?;
+        let prev_sp = self.find_sp(sp.prev_sp)?;
+        let prev_sp_ref = prev_sp.borrow();
+        prev_sp_ref.entry.as_sp().check_sp_log_order(sp, included, not_included)
     }
     
+    pub fn check_sp_exact<T>(&self, sp: Sp, exact: &[EntryInfo], ti: &T) -> Result<OuterSp, Error>
+    where T: TimeInfo {
+        sp.validate(&self.init_sp_entry_info.unwrap().hash, ti)?;
+        let prev_sp = self.find_sp(sp.prev_sp)?;
+        let prev_sp_ref = prev_sp.borrow();
+        prev_sp_ref.entry.as_sp().check_sp_exact(sp, exact)
+    }
     
-    fn new_sp(&mut self, sp: OuterSp) -> LogEntryStrong {
+    pub fn insert_outer_sp(&mut self, sp: OuterSp) -> LogEntryStrong {
         self.index += 1;
         let entry = PrevEntry::Sp(sp);
         // add the sp to the log
@@ -614,27 +371,51 @@ impl Log {
         Rc::clone(&new_sp_ref)
     }
     
-    fn new_op(&mut self, op: Op) -> LogEntryStrong {
+    pub fn new_op<T>(&mut self, op: Op, ti: &T) -> Result<LogEntryStrong, Error> where T: TimeInfo {
         self.index += 1;
+        let TimeCheck {time_not_passed: _ , include_in_hash, arrived_late} = ti.arrived_time_check(op.info.time);
+        let op_state = OpState::from_op(op)?;
         let outer_op = PrevEntry::Op(OuterOp{
-            op,
+            op: op_state,
             log_index: self.index,
+            include_in_hash,
+            arrived_late,
         });
-        // add the new op to the log
+        // compute the location of the operation in the total order of the log
+        // if the operations is before the first operation in the log, first_op will not be none
+        let mut first_op = None;
+        // otherwise we compute the operation prior to the new one in the list
+        let mut prev = None;
+        for nxt in self.op_total_order_iterator_from_last() {
+            match nxt.borrow().entry.as_op().op.cmp(&op_state) {
+                Ordering::Less => { // we found where the op should be inserted
+                    first_op = None;
+                    prev = Some(Rc::clone(&nxt));
+                    break
+                }
+                Ordering::Equal => return Err(Error::LogError(LogError::OpAlreadyExists)), // the op already found in the list
+                Ordering::Greater => first_op = Some(Rc::clone(&nxt)), // keep looking
+            }
+        };
+        if first_op.is_some() && prev.is_some() { // cannot be at the beginning of the list and have a previous entry
+            panic!(format!("problem finding the operation in the total order list, first_op {}, prev {}", first_op.is_none(), prev.is_none()))
+        }
+        // add the new op to the end of the log
         let new_op_ref = self.first_last.add_item(self.index, outer_op);
-        // put the new op in the total ordered list of ops
-        let mut last = None;
-        for nxt in self.op_total_order_iterator() {
-            if nxt.borrow().entry.as_op().op < new_op_ref.borrow().entry.as_op().op {
-                set_next_total_order(&nxt, &new_op_ref);
-                last = None;
-                break
-            } else {
-                last = Some(nxt);
+        // add the op to the total order of the log
+        if let Some(prv) = prev {
+            set_next_total_order(&prv, &new_op_ref);
+        }
+        
+        // see if need to put the op on the intial list
+        if !self.set_initial_sp_op {
+            self.set_initial_sp_op = true;
+            if let Some(sp) = self.init_sp.as_ref().and_then(|sp| sp.upgrade()) {
+                sp.borrow_mut().entry.mut_as_sp().last_op = Some(Rc::downgrade(&new_op_ref));
             }
         }
         // if last != None then we are at the begginning of the list, so we must update the new op next pointer
-        if let Some(last_op) = last {
+        if let Some(last_op) = first_op {
             set_next_total_order(&new_op_ref, &last_op)
         }
         
@@ -651,7 +432,7 @@ impl Log {
                 })
             }
         };
-        Rc::clone(&new_op_ref)
+        Ok(Rc::clone(&new_op_ref))
     }
     
     /*     fn insert_sp<'a>(&mut self, sp: SP) -> Result<&'a OuterSP, Error> {
@@ -677,149 +458,181 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use crate::{log::{op::tests::make_op_late}, verification::TimeTest};
     
-    use crate::verification::Hash;
+    use crate::{log::{entry::{total_order_after_iterator, total_order_iterator}, op::{EntryInfo, EntryInfoData, get_empty_data}}};
     
     use super::*;
     
     #[test]
     fn add_op() {
+        let mut ti = TimeTest::new();
         let mut l = Log::new();
         for _ in 0..5 {
-            let _ = l.new_op(Op::new(1));
+            let _ = l.new_op(Op::new(1, &mut ti), &ti);
         }
         let mut items = vec![];
-        for op in l.log_iterator() {
+        for op in l.log_iterator_from_end() {
             items.push(op);
         }
-        assert_eq!(5, items.len())
+        assert_eq!(6, items.len()) // six since the first entry is the init SP
+    }
+    
+    #[test]
+    fn duplicate_op() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new();
+        let id = 1;
+        let op1 = Op::new(id, &mut ti);
+        let op1_copy = op1;
+        l.new_op(op1, &ti).unwrap();
+        assert_eq!(Error::LogError(LogError::OpAlreadyExists), l.new_op(op1_copy, &ti).unwrap_err());
     }
     
     #[test]
     fn drop_op() {
+        let mut ti = TimeTest::new();
         let mut l = Log::new();
         for _ in 0..5 {
-            let _ = l.new_op(Op::new(1));
+            let _ = l.new_op(Op::new(1, &mut ti), &ti);
         }
-        for _ in 0..5 {
+        for _ in 0..6 {
             l.drop_first().unwrap();
         }
-        assert!(l.log_iterator().next().is_none());
+        assert!(l.log_iterator_from_end().next().is_none());
         let err = l.drop_first().unwrap_err();
         assert_eq!(Error::LogError(LogError::EmptyLogError), err); 
         for _ in 0..5 {
-            let _ = l.new_op(Op::new(2));
+            let _ = l.new_op(Op::new(2, &mut ti), &ti);
         }
     }
     
     #[test]
     fn op_iterator() {
+        let mut ti = TimeTest::new();
         let mut l = Log::new();
-        let op1 = Op::new(1);
-        let op2 = Op::new(2);
-        let op3 = Op::new(3);
+        let op1 = OpState::new(1, &mut ti).unwrap();
+        let op2 = OpState::new(2, &mut ti).unwrap();
+        let op3 = OpState::new(3, &mut ti).unwrap();
         let op1_clone = op1;
         let op2_clone = op2;
         let op3_clone = op3;
         // insert the op in reserve order of creation
-        let _ = l.new_op(op2);
-        let _ = l.new_op(op3);
-        let _ = l.new_op(op1);
+        let _ = l.new_op(op2.op, &ti);
+        let _ = l.new_op(op3.op, &ti);
+        let first_entry = l.new_op(op1.op, &ti).unwrap();
         // when traversing in total order, we should see op2 first since it has a larger order
-        let mut iter = l.op_total_order_iterator();
+        let mut iter = l.op_total_order_iterator_from_last();
         assert_eq!(op3_clone, iter.next().unwrap().borrow().entry.as_op().op);
         assert_eq!(op2_clone, iter.next().unwrap().borrow().entry.as_op().op);
         assert_eq!(op1_clone, iter.next().unwrap().borrow().entry.as_op().op);
+        assert!(iter.next().is_none());
+        let mut iter = total_order_iterator(Some(&first_entry), true);
+        assert_eq!(op1_clone, iter.next().unwrap().borrow().entry.as_op().op);
+        assert_eq!(op2_clone, iter.next().unwrap().borrow().entry.as_op().op);
+        assert_eq!(op3_clone, iter.next().unwrap().borrow().entry.as_op().op);
+        assert!(iter.next().is_none());
+        
+        // check using the total order iterator, but only after the index in the log
+        let mut after_iter = total_order_after_iterator(Some(&first_entry));
+        assert_eq!(op1_clone, after_iter.next().unwrap().borrow().entry.as_op().op);
+        assert!(after_iter.next().is_none()); // no values since this is the last item in the log
         
         // drop the first
-        l.drop_first().unwrap();
+        l.drop_first().unwrap(); // this is the first sp
+        l.drop_first().unwrap(); // now the first op
         // be sure we can still traverse the remaining ops
-        iter = l.op_total_order_iterator();
+        iter = l.op_total_order_iterator_from_last();
         assert_eq!(op3_clone, iter.next().unwrap().borrow().entry.as_op().op);
         assert_eq!(op1_clone, iter.next().unwrap().borrow().entry.as_op().op);
         assert!(iter.next().is_none());
         
         l.drop_first().unwrap();
         // be sure the pointer to the op was updated since we have a new last op in the total order
-        iter = l.op_total_order_iterator();
+        iter = l.op_total_order_iterator_from_last();
         assert_eq!(op1_clone, iter.next().unwrap().borrow().entry.as_op().op);
         assert!(iter.next().is_none())
     }
     
     #[test]
     fn add_sp() {
+        let mut ti = TimeTest::new();
         let mut l = Log::new();
-        let mut prev_sp_hash = None;
         let num_sp = 5;
         let id = 1;
+        let mut prev_sp_info = l.get_initial_entry_info();
         for _ in 0..num_sp {
-            let new_sp = l.new_sp(gen_sp(id, prev_sp_hash));
-            prev_sp_hash = Some(new_sp.borrow().entry.as_sp().sp.hash);
+            let new_sp = l.insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti));
+            prev_sp_info = new_sp.borrow().entry.as_sp().sp.get_entry_info();
         }
         let mut items = vec![];
-        for nxt in l.sp_iterator() {
+        for nxt in l.sp_iterator_from_last() {
             items.push(nxt);
         }
-        assert_eq!(num_sp, items.len());
+        assert_eq!(num_sp + 1, items.len());
         
         items = vec![];
         for nxt in l.sp_total_order_iterator() {
             items.push(nxt);
         }
-        assert_eq!(num_sp, items.len());
+        assert_eq!(num_sp + 1, items.len());
         
         items = vec![];
         for nxt in l.sp_local_total_order_iterator(id) {
             items.push(nxt);
         }
-        assert_eq!(5, items.len());
+        assert_eq!(num_sp, items.len());
         
         assert!(l.sp_local_total_order_iterator(id+1).next().is_none());
     }
     
     #[test]
     fn drop_sp() {
+        let mut ti = TimeTest::new();
         let mut l = Log::new();
-        let mut prev_sp_hash = None;
         let num_sp = 5;
         let id = 1;
+        let mut prev_sp_info = l.get_initial_entry_info();
         for _ in 0..num_sp {
-            let new_sp = l.new_sp(gen_sp(id, prev_sp_hash));
-            prev_sp_hash = Some(new_sp.borrow().entry.as_sp().sp.hash);
+            let new_sp = l.insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti));
+            prev_sp_info = new_sp.borrow().entry.as_sp().sp.get_entry_info();
         }
-        for _ in 0..5 {
+        // first drop the initial sp
+        l.drop_first().unwrap();
+        for _ in 0..num_sp {
             l.drop_first().unwrap();
         }
-        assert!(l.log_iterator().next().is_none());
+        assert!(l.log_iterator_from_end().next().is_none());
         let err = l.drop_first().unwrap_err();
         assert_eq!(Error::LogError(LogError::EmptyLogError), err);
         
-        prev_sp_hash = None;
+        prev_sp_info = l.get_initial_entry_info();
         for _ in 0..num_sp {
-            let new_sp = l.new_sp(gen_sp(id, prev_sp_hash));
-            prev_sp_hash = Some(new_sp.borrow().entry.as_sp().sp.hash);
+            let new_sp = l.insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti));
+            prev_sp_info = new_sp.borrow().entry.as_sp().sp.get_entry_info();
         }
     }
     
     #[test]
     fn sp_iterator() {
+        let mut ti = TimeTest::new();
         let mut l = Log::new();
-        let mut last_sps: HashMap<Id, Hash> = HashMap::new();
+        let mut last_sps: HashMap<Id, EntryInfo> = HashMap::new();
         let num_ids = 5;
         let num_sps = 5;
         
         for _ in 0..num_sps {
             for i in 0..num_ids {
-                let new_sp = l.new_sp(gen_sp(i, last_sps.remove(&i)));
-                last_sps.insert(i, new_sp.borrow().entry.as_sp().sp.hash);    
+                let new_sp = l.insert_outer_sp(gen_sp(i, get_entry_info(i, &l, &last_sps), &mut ti));
+                last_sps.insert(i, new_sp.borrow().entry.as_sp().sp.get_entry_info());    
             }
         }
         
         let mut items = vec![];
-        for nxt in l.sp_iterator() {
+        for nxt in l.sp_iterator_from_last() {
             items.push(nxt)
         }
-        assert_eq!((num_ids * num_sps) as usize, items.len());
+        assert_eq!((num_ids * num_sps + 1) as usize, items.len());
         
         for i in 0..num_ids {
             let mut items = vec![];
@@ -831,15 +644,15 @@ mod tests {
         
         // insert two in reverse order
         let iter_id = 0;
-        let sp1 = gen_sp(iter_id, Some(*last_sps.get(&iter_id).unwrap()));
-        let sp2 = gen_sp(iter_id, Some(*last_sps.get(&iter_id).unwrap()));
+        let sp1 = gen_sp(iter_id, get_entry_info(iter_id, &l, &last_sps), &mut ti);
+        let sp2 = gen_sp(iter_id, get_entry_info(iter_id, &l, &last_sps), &mut ti);
         let sp1_clone = sp1.sp.clone();
         let sp2_clone = sp2.sp.clone();
-        l.new_sp(sp2);
-        l.new_sp(sp1);
+        l.insert_outer_sp(sp2);
+        l.insert_outer_sp(sp1);
         
         // should be in insert order
-        let mut iter = l.sp_iterator();
+        let mut iter = l.sp_iterator_from_last();
         assert_eq!(sp1_clone, iter.next().unwrap().borrow().entry.as_sp().sp);
         assert_eq!(sp2_clone, iter.next().unwrap().borrow().entry.as_sp().sp);
         
@@ -855,11 +668,185 @@ mod tests {
         assert_eq!(sp1_clone, iter.next().unwrap().borrow().entry.as_sp().sp);        
     }
     
-    fn gen_sp(id: u64, prev_sp_hash: Option<Hash>) -> OuterSp {
+    fn gen_sp(id: u64, prev_sp: EntryInfo, ti: &mut TimeTest) -> OuterSp {
+        let hsh = OpState::new(1, ti).unwrap().hash;
+        let sp = SpState::new(id, ti.now_monotonic(), [hsh].iter().cloned(), vec![], prev_sp).unwrap();
+        ti.set_sp_time_valid(sp.sp.info.time);
         OuterSp{
-            sp: Sp::new(id, prev_sp_hash),
+            sp,
             not_included_ops: vec![],
             prev_sp: None,
+            last_op: None,
         }
     }
+    
+    #[test]
+    fn verify_sp() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new();
+        let num_ids = 5;
+        let num_ops  = 5;
+        let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
+        let m = ops.iter().map(|op| {
+            op.borrow().entry.as_op().op.hash
+        });
+        let id = 0;
+        let sp1 = SpState::new(id, ti.now_monotonic(),m, vec![], l.get_initial_entry_info()).unwrap();
+        ti.set_sp_time_valid(sp1.sp.info.time);
+        let sp1_info = sp1.get_entry_info();
+        let outer_sp1 = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
+        l.insert_outer_sp(outer_sp1);
+        
+        let m = ops.iter().map(|op| {
+            op.borrow().entry.as_op().op.hash
+        });
+        let sp2 = Sp::new(id+1, ti.now_monotonic(),m, vec![], l.get_initial_entry_info());
+        ti.set_sp_time_valid(sp2.info.time);
+        let outer_sp2 = l.check_sp(sp2, &[], &[], &ti).unwrap();
+        l.insert_outer_sp(outer_sp2);
+        
+        let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
+        let m = ops.iter().map(|op| {
+            op.borrow().entry.as_op().op.hash
+        });
+        let sp3 = Sp::new(id, ti.now_monotonic(),m, vec![], sp1_info);
+        ti.set_sp_time_valid(sp3.info.time);
+        let _outer_sp3 = l.check_sp(sp3, &[], &[], &ti).unwrap();
+    }
+    
+    #[test]
+    fn late_op() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new();
+        let id = 0;
+        let op1 = make_op_late(OpState::new(id, &mut ti).unwrap());
+        let outer_op1 = l.new_op(op1.op, &ti).unwrap();
+        assert!(outer_op1.borrow().entry.as_op().arrived_late);
+        
+        // op2 will be included as normal op
+        let op2 = OpState::new(id, &mut ti).unwrap();
+        let outer_op2 = l.new_op(op2.op, &ti).unwrap();
+        assert!(!outer_op2.borrow().entry.as_op().arrived_late);
+        
+        let sp1 = Sp::new(id, ti.now_monotonic(),[op1.hash].iter().cloned(), vec![], l.get_initial_entry_info());
+        ti.set_sp_time_valid(sp1.info.time);
+        // op3 has a later time so should not be included
+        let op3 = Op::new(id, &mut ti);
+        l.new_op(op3, &ti).unwrap();
+        
+        println!("op1 {}, op2 {}, op3 {}, sp1 {}", op1.op.info.time, op2.op.info.time, op3.info.time, sp1.info.time);
+
+        // when input op2 will be used, so it will create a hash error
+        assert_eq!(Error::LogError(LogError::SpHashNotComputed), l.check_sp(sp1, &[], &[], &ti).unwrap_err());
+        // use both sp1 and sp2, using included input to check_sp for sp1
+        let hash_vec = vec![op1.hash, op2.hash];
+        let sp1 = Sp::new(id, ti.now_monotonic(),hash_vec.iter().cloned(), vec![], l.get_initial_entry_info());
+        ti.set_sp_time_valid(sp1.info.time);
+        
+        l.check_sp(sp1, &[op1.get_entry_info()], &[], &ti).unwrap();
+        
+        // use both sp1 and sp2, using additional_ops input with to include sp1
+        let op1_data = EntryInfoData{
+            info: op1.get_entry_info(),
+            data: get_empty_data(),
+        };
+        let sp1 = Sp::new(id, ti.now_monotonic(),hash_vec.iter().cloned(), vec![op1_data], l.get_initial_entry_info());
+        ti.set_sp_time_valid(sp1.info.time);
+        l.check_sp(sp1, &[], &[], &ti).unwrap();
+    }
+    
+    #[test]
+    fn unsupported_sp() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new();
+        let num_ids = 5;
+        let num_ops  = 5;
+        let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
+        // the not included ops are the odd ones
+        let not_included: Vec<_> = ops.iter().filter_map(|op_rc| {
+            let op_ref = op_rc.borrow();
+            let op = op_ref.entry.as_op();
+            if op.log_index % 2 != 0 { // dont include he non even ones
+                return Some(op.op.get_entry_info())
+            }
+            None
+        }).collect();
+        let not_included_count = not_included.len();
+        // the included ops are the even ones
+        let m = ops.iter().filter_map(|op_rc| {
+            let op_ref = op_rc.borrow();
+            let op = op_ref.entry.as_op();
+            if op.log_index % 2 == 0 { // only take the even ones
+                return Some(op.op.hash)
+            }
+            None
+        });
+        
+        let id = 0;
+        let sp1 = SpState::new(id, ti.now_monotonic(),m, vec![], l.get_initial_entry_info()).unwrap();
+        ti.set_sp_time_valid(sp1.sp.info.time);
+        let sp1_info = sp1.get_entry_info();
+        let outer_sp1 = l.check_sp(sp1.sp, &[], &not_included, &ti).unwrap();
+        // be sure there are unsupported ops
+        assert_eq!(not_included_count, outer_sp1.not_included_ops.len());
+        l.insert_outer_sp(outer_sp1);
+        
+        // make an sp with the other items
+        let sp2 = Sp::new(id, ti.now_monotonic(),not_included.iter().map(|nxt| nxt.hash), vec![], sp1_info);
+        ti.set_sp_time_valid(sp2.info.time);
+        let outer_sp2 = l.check_sp(sp2, &[], &[], &ti).unwrap();
+        assert_eq!(0, outer_sp2.not_included_ops.len());
+        l.insert_outer_sp(outer_sp2);
+    }
+    
+    #[test]
+    fn no_op_sp() {
+        let mut ti = TimeTest::new();
+        let l = Log::new();
+        let id = 0;
+        let op1 = OpState::new(id, &mut ti).unwrap();
+        let sp1 = SpState::new(id, ti.now_monotonic(),[op1.hash].iter().cloned(), vec![], l.get_initial_entry_info()).unwrap();
+        ti.set_sp_time_valid(sp1.sp.info.time);
+        assert_eq!(Error::LogError(LogError::PrevSpHasNoLastOp), l.check_sp(sp1.sp, &[], &[], &ti).unwrap_err());
+    }
+    
+    #[test]
+    fn exact_sp() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new();
+        let id = 0;
+        let op1 = OpState::new(id, &mut ti).unwrap();
+        let op2 = make_op_late(OpState::new(id, &mut ti).unwrap());
+        l.new_op(op2.op, &ti).unwrap();
+        l.new_op(op1.op, &ti).unwrap();
+        let sp1 = SpState::new(id, ti.now_monotonic(),[op1.hash].iter().cloned(), vec![], l.get_initial_entry_info()).unwrap();
+        ti.set_sp_time_valid(sp1.sp.info.time);
+        let sp1_info = sp1.get_entry_info();
+        let outer_sp1 = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
+        assert_eq!(1, outer_sp1.not_included_ops.len());
+        l.insert_outer_sp(outer_sp1);
+        let sp2 = Sp::new(id, ti.now_monotonic(),[op2.hash].iter().cloned(), vec![], sp1_info);
+        ti.set_sp_time_valid(sp2.info.time);
+        let outer_sp2 = l.check_sp_exact(sp2, &[op2.get_entry_info()], &ti).unwrap();
+        assert_eq!(0, outer_sp2.not_included_ops.len());
+        l.insert_outer_sp(outer_sp2);
+    }
+    
+    fn insert_ops(num_ops: usize, num_ids: Id, l: &mut Log, ti: &mut TimeTest) -> Vec<LogEntryStrong> {
+        let mut ret = vec![];
+        for _ in 0..num_ops {
+            for i in 0..num_ids {
+                ret.push(l.new_op(Op::new(i, ti), ti).unwrap());
+            }
+        }
+        ret
+    }
+    
+    fn get_entry_info(id: Id, l: &Log, last_sps: &HashMap<Id, EntryInfo>) -> EntryInfo {
+        match last_sps.get(&id) {
+            Some(ei) => *ei,
+            None => l.get_initial_entry_info(),
+        }
+    }
+    
 }
