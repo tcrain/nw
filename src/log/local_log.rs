@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, rc::Rc};
+use std::{cmp::Ordering};
 use crate::{errors::{Error}, verification::{Id, TimeInfo}};
 
 use super::{basic_log::Log, entry::LogEntryStrong, op::{EntryInfo, Op}, sp::{Sp, SpState}};
@@ -9,7 +9,7 @@ impl Eq for HeapOp {}
 
 impl Ord for HeapOp {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.borrow().entry.as_op().op.cmp(&other.0.borrow().entry.as_op().op)
+        self.0.get_ptr().borrow().entry.as_op().op.cmp(&other.0.get_ptr().borrow().entry.as_op().op)
     }
 }
 
@@ -21,7 +21,7 @@ impl PartialOrd for HeapOp {
 
 impl PartialEq for HeapOp {
     fn eq(&self, other: &Self) -> bool {
-        self.0.borrow().entry.as_op().op == other.0.borrow().entry.as_op().op
+        self.0.get_ptr().borrow().entry.as_op().op == other.0.get_ptr().borrow().entry.as_op().op
     }
 }
 
@@ -70,11 +70,13 @@ impl LocalLog {
         let mut late_included = vec![];
         let outer_sp = { // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
-            let last_sp = Rc::clone(&self.last_sp);
-            let last_sp_ref = last_sp.borrow();
+            let last_sp = self.last_sp.clone_strong();
+            let last_sp_ptr = last_sp.get_ptr();
+            let last_sp_ref = last_sp_ptr.borrow();
             
             let op_iter = last_sp_ref.entry.as_sp().get_ops_after_iter()?.filter_map(|op_rc| {
-                let op_ref = op_rc.borrow();
+                let op_ptr = op_rc.get_ptr();
+                let op_ref = op_ptr.borrow();
                 let op = op_ref.entry.as_op();
                 if op.op.op.info.time <= t {
                     if op.arrived_late {
@@ -87,8 +89,8 @@ impl LocalLog {
             let sp = SpState::new(self.id, t, op_iter, vec![], last_sp_ref.entry.as_sp().sp.get_entry_info()).unwrap();
             self.log.check_sp(sp.sp, &late_included, &[], ti)?
         };
-        let ret = self.log.insert_outer_sp(outer_sp);
-        self.last_sp = Rc::clone(&ret);
+        let ret = self.log.insert_outer_sp(outer_sp)?;
+        self.last_sp = ret.clone_strong(); // ::clone(&ret);
         Ok((ret, late_included))
     }
     
@@ -96,15 +98,19 @@ impl LocalLog {
 
 #[cfg(test)]
 mod tests {
-    use crate::{log::{basic_log::Log, op::{Op, OpState, tests::{make_op_late}}}, verification::TimeTest};
+    use crate::{log::{basic_log::Log, log_file::LogFile, op::{Op, OpState, tests::{make_op_late}}}, verification::TimeTest};
     
     use super::new_local_log;
     
+    fn get_log_file(idx: usize) -> LogFile {
+        LogFile::open(&format!("local_log{}.log", idx), true).unwrap()
+    }
+
     #[test]
     fn local_log_add_op() {
         let mut ti = TimeTest::new();
         let id = 0;
-        let l = Log::new();
+        let l = Log::new(get_log_file(0));
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = Op::new(id, &mut ti);
         ll.received_op(op1, &ti).unwrap();
@@ -114,7 +120,7 @@ mod tests {
     fn local_log_sp() {
         let mut ti = TimeTest::new();
         let id = 0;
-        let l = Log::new();
+        let l = Log::new(get_log_file(1));
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = Op::new(id, &mut ti);
         let op_t = op1.info.time;
@@ -128,12 +134,12 @@ mod tests {
     fn local_log_late_op() {
         let mut ti = TimeTest::new();
         let id = 0;
-        let l = Log::new();
+        let l = Log::new(get_log_file(2));
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = make_op_late(OpState::new(id, &mut ti).unwrap());
         let op_t = op1.op.info.time;
         let op1_ref = ll.received_op(op1.op, &ti).unwrap();
-        assert!(!op1_ref.borrow().entry.as_op().include_in_hash);
+        assert!(!op1_ref.get_ptr().borrow().entry.as_op().include_in_hash);
         ti.sleep_op_until_late(op_t);
         let (_outer_sp, late_included) = ll.create_local_sp(&mut ti).unwrap();
         assert_eq!(1, late_included.len());

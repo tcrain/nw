@@ -1,7 +1,8 @@
 // use ed25519_dalek::Signature;
 use std::{time::{SystemTime, UNIX_EPOCH}};
 
-use crate::config::{ARRIVED_LATE_TIMEOUT, INCLUDE_IN_HASH_TIMEOUT, Time};
+use crate::{config::{ARRIVED_LATE_TIMEOUT, INCLUDE_IN_HASH_TIMEOUT, Time}, errors::{Error, LogError}};
+use bincode::serialize;
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Copy, Hash, Ord, Eq, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
@@ -35,6 +36,18 @@ impl Blake3Hasher {
         cast_blake3(self.0.finalize())
     }
 }
+
+pub fn check_hash<T>(entry: &T, entry_hash: &Hash) -> Result<(), Error> where 
+    T: ?Sized + serde::Serialize{
+
+    let enc = serialize(entry).map_err(|_err| Error::LogError(LogError::SerializeError))?;
+    let new_hash = hash(&enc);
+    if *entry_hash != new_hash {
+        return Err(Error::LogError(LogError::InvalidHash));
+    }
+    Ok(())
+}
+
 
 pub type Hash = Blake3Hash;
 pub type Hasher = Blake3Hasher;

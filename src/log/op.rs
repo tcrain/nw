@@ -3,7 +3,7 @@ use std::{fmt};
 use bincode::{serialize};
 use rand::{thread_rng, Rng};
 use verification::TimeInfo;
-use crate::{errors::{Error, LogError}, verification::{Id, Hash}};
+use crate::{errors::{Error, LogError}, verification::{Hash, Id}};
 use crate::config::Time;
 use crate::verification;
 use serde::{Serialize, Deserialize};
@@ -32,13 +32,13 @@ pub struct EntryInfo { // order first by time, then by ID, then by hash
     pub hash: Hash, // hash of the data of the event
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct EntryInfoData {
     pub info: EntryInfo,
     pub data: OpData,
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct OpState {
     pub op: Op,
     pub hash: Hash,
@@ -48,6 +48,10 @@ impl OpState {
     pub fn new<T>(id: Id, ti: &mut T) -> Result<OpState, Error>  where T: TimeInfo {
         let op = Op::new(id, ti);
         OpState::from_op(op)
+    }
+
+    pub fn check_hash(&self) -> Result<(), Error> {
+        verification::check_hash(&self.op, &self.hash)
     }
 
     pub fn from_op(op: Op) -> Result<OpState, Error> {

@@ -6,9 +6,17 @@ pub enum Error {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogError{
+    EOFError,
+    FileError,
+    FileReadError,
+    FileWriteError,
+    FileSeekError,
     SerializeError,
+    DeserializeError,
     NoNewOps,
+    OpAlreadyDropped,
     OpAlreadyExists,
+    InvalidHash,
     EmptyLogError,
     PrevSpHasNoLastOp,
     IdHasNoSp,

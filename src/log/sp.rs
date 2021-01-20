@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, fmt::{self, Debug, Display, Formatter}, vec};
 
-use crate::{config::Time, errors::{Error, LogError}, verification::{Hash, Id, TimeCheck, TimeInfo, hash, new_hasher}};
+use crate::{config::Time, errors::{Error, LogError}, verification::{self, Hash, Id, TimeCheck, TimeInfo, hash, new_hasher}};
 
 use super::op::{BasicInfo, EntryInfo, EntryInfoData};
 use bincode::serialize;
@@ -15,6 +15,10 @@ pub struct SpState {
 }
 
 impl SpState {
+
+    pub fn check_hash(&self) -> Result<(), Error> {
+        verification::check_hash(&self.sp, &self.hash)
+    }
     
     pub fn new<I>(id: Id, time: Time, ops_supported: I, additional_ops: Vec<EntryInfoData>, prev_sp: EntryInfo) -> Result<SpState, Error>
     where I: Iterator<Item = Hash> {
