@@ -18,6 +18,7 @@ pub enum LogError{
     OpAlreadyExists,
     InvalidHash,
     EmptyLogError,
+    SingleItemLog,
     PrevSpHasNoLastOp,
     IdHasNoSp,
     PrevSpNotFound,

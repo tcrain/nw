@@ -1,45 +1,21 @@
-use std::{cmp::Ordering};
 use crate::{errors::{Error}, verification::{Id, TimeInfo}};
 
-use super::{basic_log::Log, entry::LogEntryStrong, op::{EntryInfo, Op}, sp::{Sp, SpState}};
-
-struct HeapOp(LogEntryStrong);
-
-impl Eq for HeapOp {}
-
-impl Ord for HeapOp {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.get_ptr().borrow().entry.as_op().op.cmp(&other.0.get_ptr().borrow().entry.as_op().op)
-    }
-}
-
-impl PartialOrd for HeapOp {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for HeapOp {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.get_ptr().borrow().entry.as_op().op == other.0.get_ptr().borrow().entry.as_op().op
-    }
-}
-
+use super::{basic_log::Log, entry::{LogEntryStrong, StrongPtrIdx}, op::{EntryInfo, Op}, sp::{Sp, SpState}};
 
 pub struct LocalLog {
     id: Id,
-    log: Log,
+    l: Log,
     // new_ops: BinaryHeap<HeapOp>,
     last_sp: LogEntryStrong,
 }
 
-pub fn new_local_log(id: Id, l: Log) -> Result<LocalLog, Error> {
+pub fn new_local_log(id: Id, mut l: Log) -> Result<LocalLog, Error> {
     let last_sp = l.get_last_sp_id(id).or_else(|_| {
         l.get_initial_sp()
-    })?;
+    })?.to_log_entry_strong();
     Ok(LocalLog {
         id,
-        log: l,
+        l,
         last_sp,
     })
 }
@@ -57,8 +33,8 @@ pub struct SpExactToProcess {
 
 impl LocalLog {
     
-    pub fn received_op<T>(&mut self, op: Op, ti: &T) -> Result<LogEntryStrong, Error> where T: TimeInfo {
-        let op_log = self.log.new_op(op, ti)?;
+    pub fn received_op<T>(&mut self, op: Op, ti: &T) -> Result<StrongPtrIdx, Error> where T: TimeInfo {
+        let op_log = self.l.new_op(op, ti)?;
         Ok(op_log)
     }
 
@@ -66,17 +42,16 @@ impl LocalLog {
         //self.log.check_sp_exact(sp, exact)
     //}
     
-    pub fn create_local_sp<T>(&mut self, ti: &mut T) -> Result<(LogEntryStrong, Vec<EntryInfo>), Error> where T: TimeInfo {
+    pub fn create_local_sp<T>(&mut self, ti: &mut T) -> Result<(StrongPtrIdx, Vec<EntryInfo>), Error> where T: TimeInfo {
         let mut late_included = vec![];
         let outer_sp = { // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
-            let last_sp = self.last_sp.clone_strong();
-            let last_sp_ptr = last_sp.get_ptr();
+            let mut last_sp = self.last_sp.clone_strong();
+            let last_sp_ptr = last_sp.get_ptr(&mut self.l.m, &mut self.l.f);
             let last_sp_ref = last_sp_ptr.borrow();
             
-            let op_iter = last_sp_ref.entry.as_sp().get_ops_after_iter()?.filter_map(|op_rc| {
-                let op_ptr = op_rc.get_ptr();
-                let op_ref = op_ptr.borrow();
+            let op_iter = last_sp_ref.entry.as_sp().get_ops_after_iter(&mut self.l.m, &mut self.l.f)?.filter_map(|op_rc| {
+                let op_ref = op_rc.ptr.borrow();
                 let op = op_ref.entry.as_op();
                 if op.op.op.info.time <= t {
                     if op.arrived_late {
@@ -87,10 +62,10 @@ impl LocalLog {
                 None
             });
             let sp = SpState::new(self.id, t, op_iter, vec![], last_sp_ref.entry.as_sp().sp.get_entry_info()).unwrap();
-            self.log.check_sp(sp.sp, &late_included, &[], ti)?
+            self.l.check_sp(sp.sp, &late_included, &[], ti)?
         };
-        let ret = self.log.insert_outer_sp(outer_sp)?;
-        self.last_sp = ret.clone_strong(); // ::clone(&ret);
+        let ret = self.l.insert_outer_sp(outer_sp)?;
+        self.last_sp = ret.to_log_entry_strong(); // ::clone(&ret);
         Ok((ret, late_included))
     }
     
@@ -139,7 +114,7 @@ mod tests {
         let op1 = make_op_late(OpState::new(id, &mut ti).unwrap());
         let op_t = op1.op.info.time;
         let op1_ref = ll.received_op(op1.op, &ti).unwrap();
-        assert!(!op1_ref.get_ptr().borrow().entry.as_op().include_in_hash);
+        assert!(!op1_ref.ptr.borrow().entry.as_op().include_in_hash);
         ti.sleep_op_until_late(op_t);
         let (_outer_sp, late_included) = ll.create_local_sp(&mut ti).unwrap();
         assert_eq!(1, late_included.len());

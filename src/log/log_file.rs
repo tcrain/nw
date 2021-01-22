@@ -2,7 +2,6 @@ use std::{fs::{File, OpenOptions}, io::{Read, Seek, SeekFrom, Write}, path::Path
 
 use bincode::{DefaultOptions, Options, options};
 use log::{error, info};
-use serde::{Deserialize, Serialize};
 
 use crate::errors::{Error, LogError};
 
@@ -61,28 +60,6 @@ pub struct LogFile {
     at_end: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FilePointers {
-    pub prev_log: u64,
-    // next_log: u64,
-    pub prev_to: u64,
-    pub next_to: u64, // a zero means there is no next
-}
-
-impl FilePointers {
-    fn new(prev_log: u64, prev_to: u64, next_to: u64) -> FilePointers {
-        FilePointers{
-            prev_log,
-            prev_to,
-            next_to,
-        }
-    }
-
-    pub fn byte_size() -> u64 {
-        24 // 3 u64
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct FileOpInfo {
     pub start_location: u64,
@@ -124,11 +101,6 @@ impl LogFile {
         })
     }
     
-    fn read_pointers_at(&mut self, idx: u64) -> Result<FilePointers, Error> {
-        self.seek_to(idx)?;
-        self.read_pointers()
-    }
-
     // should be called after reading or writing to ensure the indicies are not broked
     fn check_file(&self) {
         if self.file_idx > self.end_idx {
@@ -185,15 +157,6 @@ impl LogFile {
         })
     }
     
-    fn read_pointers(&mut self) -> Result<FilePointers, Error> {
-        let ret = options().with_fixint_encoding().deserialize_from(&mut self.file).map_err(|err| {
-            println!("read pointers error {}", err);
-            Error::LogError(LogError::DeserializeError)
-        })?;
-        self.after_read();
-        Ok(ret)
-    }
-
     fn after_read(&mut self) -> (Vec<u8>, FileOpInfo) {
         let bytes_read = self.file.reset_bytes_read();
         let start_location = self.file_idx;
@@ -245,18 +208,6 @@ impl LogFile {
         })
     }
     
-    fn write_pointers_at(&mut self, idx: u64, p: &FilePointers) -> Result<u64, Error> {
-        self.seek_to(idx)?;
-        self.write_pointers(p)
-    }
-    
-    fn write_pointers(&mut self, p: &FilePointers) -> Result<u64, Error> {
-        options().with_fixint_encoding().serialize_into(&mut self.file, p).map_err(|_| Error::LogError(LogError::SerializeError))?;
-        let ret = self.file_idx;
-        self.after_write();
-        Ok(ret)
-    }
-    
     pub fn seek_to_end(&mut self) -> u64 {
         self.at_end = true;
         self.end_idx = self.file.file.seek(SeekFrom::End(0)).expect("unable to seek to file end");
@@ -296,38 +247,12 @@ impl LogFile {
 
 #[cfg(test)]
 mod tests {
-    use bincode::{serialized_size};
-    use log::info;
     use serde::{Serialize, Deserialize};
     use crate::errors::{Error, LogError};
     use bincode::{Options};
     
-    use super::{LogFile, FilePointers};
-    
-    #[test]
-    fn create_log() {
-        let mut l = LogFile::open("testfile-0.log", true).unwrap();
-        let mut ids = vec![];
-        let mut ptrs = vec![];
-        let count: u64 = 5;
-        for i in 0..count {
-            let p = FilePointers::new(i<<2, i<<10, i<<20);
-            let idx = l.write_pointers(&p).unwrap();
-            info!("write idx {}, ptr {:#?}", idx, p);
-            ptrs.push(p);
-            ids.push(idx);
-        }
-        for (&idx, &p) in ids.iter().zip(ptrs.iter()) {
-            let p2 = l.read_pointers_at(idx).unwrap();
-            assert_eq!(p, p2);
-        }
-        l.seek_to(0).unwrap();
-        for &p in ptrs.iter() {
-            let p2 = l.read_pointers().unwrap();
-            assert_eq!(p, p2);
-        }
-    }
-    
+    use super::{LogFile};
+        
     #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
     struct SomeSer {
         b: u64,
@@ -345,10 +270,6 @@ mod tests {
     
     #[test]
     fn append_log() {
-        let ptr = FilePointers::new(1, 2, 3);
-        let s = serialized_size(&ptr).unwrap();
-        println!("prts size {}", s);
-
         let mut l = LogFile::open("testfile-1.log", true).unwrap();
         let mut entrys = vec![];
         let count: u64 = 5;
