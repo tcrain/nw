@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 log="0.4"
-rand = "0.8.0"
+rand = "0.8"
 blake3 = "0.3.7"
 itertools = "0.10.0"
 # ed25519-dalek = "1.0.1"

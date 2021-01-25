@@ -69,6 +69,10 @@ pub struct FileOpInfo {
 
 impl LogFile {
     
+    pub fn serialize_option(&self) -> DefaultOptions {
+        self.options
+    }
+    
     pub fn open(path_string: &str, clear: bool) -> Result<LogFile, Error> {
         let path = Path::new(path_string);
         info!("Opening log file {}", path.display());

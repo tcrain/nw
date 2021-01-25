@@ -2,7 +2,7 @@
 use std::{time::{SystemTime, UNIX_EPOCH}};
 
 use crate::{config::{ARRIVED_LATE_TIMEOUT, INCLUDE_IN_HASH_TIMEOUT, Time}, errors::{Error, LogError}};
-use bincode::serialize;
+use bincode::{Options};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Copy, Hash, Ord, Eq, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
@@ -37,15 +37,16 @@ impl Blake3Hasher {
     }
 }
 
-pub fn check_hash<T>(entry: &T, entry_hash: &Hash) -> Result<(), Error> where 
-    T: ?Sized + serde::Serialize{
+pub fn check_hash<T, O>(entry: &T, entry_hash: &Hash, o: O) -> Result<Vec<u8>, Error> where 
+    T: ?Sized + serde::Serialize,
+    O: Options {
 
-    let enc = serialize(entry).map_err(|_err| Error::LogError(LogError::SerializeError))?;
+    let enc = o.serialize(entry).map_err(|_err| Error::LogError(LogError::SerializeError))?;
     let new_hash = hash(&enc);
     if *entry_hash != new_hash {
         return Err(Error::LogError(LogError::InvalidHash));
     }
-    Ok(())
+    Ok(enc)
 }
 
 
@@ -131,6 +132,10 @@ impl TimeTest {
         TimeTest{
             last_time: 10_000_000_000,
         }
+    }
+
+    pub fn set_current_time_valid(&mut self) {
+        self.last_time += INCLUDE_IN_HASH_TIMEOUT + 10;
     }
 
     pub fn sleep_op_until_late(&mut self, t: Time) {

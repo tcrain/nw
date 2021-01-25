@@ -3,7 +3,7 @@ use std::{cmp::Ordering, fmt::{self, Debug, Display, Formatter}, vec};
 use crate::{config::Time, errors::{Error, LogError}, verification::{self, Hash, Id, TimeCheck, TimeInfo, hash, new_hasher}};
 
 use super::op::{BasicInfo, EntryInfo, EntryInfoData};
-use bincode::serialize;
+use bincode::{Options};
 use serde::{Serialize, Deserialize};
 
 pub type SupportCount = u64;
@@ -15,25 +15,25 @@ pub struct SpState {
 }
 
 impl SpState {
-
-    pub fn check_hash(&self) -> Result<(), Error> {
-        verification::check_hash(&self.sp, &self.hash)
+    
+    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>, Error> {
+        verification::check_hash(&self.sp, &self.hash, o)
     }
     
-    pub fn new<I>(id: Id, time: Time, ops_supported: I, additional_ops: Vec<EntryInfoData>, prev_sp: EntryInfo) -> Result<SpState, Error>
-    where I: Iterator<Item = Hash> {
+    pub fn new<I, O>(id: Id, time: Time, ops_supported: I, additional_ops: Vec<EntryInfoData>, prev_sp: EntryInfo, o: O) -> Result<SpState, Error>
+    where I: Iterator<Item = Hash>, O: Options {
         let sp = Sp::new(id, time, ops_supported, additional_ops, prev_sp);
-        SpState::from_sp(sp)
+        SpState::from_sp(sp, o)
     }
     
-    pub fn from_sp(sp: Sp) -> Result<SpState, Error> {
-        let enc = serialize(&sp).map_err(|_err| Error::LogError(LogError::SerializeError))?;
+    pub fn from_sp<O: Options>(sp: Sp, o: O) -> Result<SpState, Error> {
+        let enc = o.serialize(&sp).map_err(|_err| Error::LogError(LogError::SerializeError))?;
         Ok(SpState {
             sp,
             hash: hash(&enc),
         })
     }
-
+    
     pub fn get_entry_info(&self) -> EntryInfo {
         EntryInfo{
             basic: self.sp.info,
@@ -131,14 +131,18 @@ impl Sp {
         self.info.id == 0 && self.info.time == 0
     }
     
-    pub fn prev_is_init(&self, init_sp_hash: &Hash) -> Result<bool, Error> {
-        if self.prev_sp.basic.id == 0 && self.prev_sp.basic.time == 0 {
-            if &self.prev_sp.hash != init_sp_hash {
+    pub fn is_init_entry(ei: EntryInfo, init_sp_hash: &Hash) -> Result<bool, Error> {
+        if ei.basic.id == 0 && ei.basic.time == 0 {
+            if &ei.hash != init_sp_hash {
                 return Err(Error::LogError(LogError::SpInvalidInitHash));
             }
             return Ok(true);
         }
         Ok(false)
+    }
+    
+    pub fn prev_is_init(&self, init_sp_hash: &Hash) -> Result<bool, Error> {
+        Sp::is_init_entry(self.prev_sp, init_sp_hash)
     }
     
     pub fn validate<T>(&self, init_sp_hash: &Hash, ti: &T) -> Result<(), Error> where T: TimeInfo{
@@ -162,13 +166,13 @@ impl Sp {
 #[cfg(test)]
 pub mod tests {
     
-    use bincode::{deserialize, serialize};
+    use bincode::{Options, deserialize, options, serialize};
     
     use crate::{errors::{Error, LogError}, log::op::{BasicInfo, EntryInfo, OpState}, verification::{Id, TimeInfo, TimeTest, hash}};
     
     use super::{Sp, SpState};
     
-    fn make_sp(id: Id, ti: &mut TimeTest) -> SpState {
+    fn make_sp<O: Options + Copy>(id: Id, ti: &mut TimeTest, o: O) -> SpState {
         let info = EntryInfo{
             basic: BasicInfo{
                 time: 0,
@@ -176,16 +180,16 @@ pub mod tests {
             },
             hash: hash(b"init msg"),
         };
-        let ops = [OpState::new(1, ti).unwrap()];
+        let ops = [OpState::new(1, ti, o).unwrap()];
         
-        SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info).unwrap()
+        SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info, o).unwrap()
     }
     
     #[test]
     fn sp_serialize() {
         let mut ti = TimeTest::new();
         let id = 1;
-        let sp1 = make_sp(id, &mut ti);
+        let sp1 = make_sp(id, &mut ti, options());
         
         let mut enc = serialize(&sp1).unwrap();
         enc.push(10);
@@ -209,22 +213,22 @@ pub mod tests {
         };
         // let init_hash = hash(b"init hash");
         let init_hash = info.hash;
-        let ops = [OpState::new(1, &mut ti).unwrap()];
+        let ops = [OpState::new(1, &mut ti, options()).unwrap()];
         
-        let sp1_invalid_time = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info).unwrap();
+        let sp1_invalid_time = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info, options()).unwrap();
         // the sp must arrive late enough so new operations that are on time will be later in the log
         assert_eq!(Error::LogError(LogError::SpArrivedEarly), sp1_invalid_time.sp.validate(&init_hash, &ti).unwrap_err());        
         
-        let mut sp1 = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info).unwrap();
+        let mut sp1 = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info, options()).unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         sp1.sp.validate(&init_hash, &ti).unwrap();
         
-        let mut sp2 = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], sp1.get_entry_info()).unwrap();
+        let mut sp2 = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], sp1.get_entry_info(), options()).unwrap();
         ti.set_sp_time_valid(sp2.sp.info.time);
         sp2.sp.validate(&init_hash, &ti).unwrap();
         assert!(sp1 < sp2);
         
-        let mut sp3 = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info).unwrap();
+        let mut sp3 = SpState::new(id, ti.now_monotonic(),ops.iter().map(|op| op.hash), vec![], info, options()).unwrap();
         ti.set_sp_time_valid(sp3.sp.info.time);
         assert!(sp1 != sp3);
         sp3.sp.info.time = sp1.sp.info.time;

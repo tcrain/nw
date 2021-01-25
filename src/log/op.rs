@@ -1,8 +1,8 @@
 use std::{cmp::Ordering, fmt::{Debug, Display, Formatter}};
 use std::{fmt};
-use bincode::{serialize};
+use bincode::{Options};
 use rand::{thread_rng, Rng};
-use verification::TimeInfo;
+use verification::{TimeInfo, hash};
 use crate::{errors::{Error, LogError}, verification::{Hash, Id}};
 use crate::config::Time;
 use crate::verification;
@@ -32,6 +32,15 @@ pub struct EntryInfo { // order first by time, then by ID, then by hash
     pub hash: Hash, // hash of the data of the event
 }
 
+impl Default for EntryInfo {
+    fn default() -> Self {
+        EntryInfo{
+            basic: BasicInfo{ time: 0, id: 0},
+            hash: hash(b""),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct EntryInfoData {
     pub info: EntryInfo,
@@ -45,17 +54,17 @@ pub struct OpState {
 }
 
 impl OpState {
-    pub fn new<T>(id: Id, ti: &mut T) -> Result<OpState, Error>  where T: TimeInfo {
+    pub fn new<T, O>(id: Id, ti: &mut T, o: O) -> Result<OpState, Error>  where T: TimeInfo, O: Options {
         let op = Op::new(id, ti);
-        OpState::from_op(op)
+        OpState::from_op(op, o)
     }
 
-    pub fn check_hash(&self) -> Result<(), Error> {
-        verification::check_hash(&self.op, &self.hash)
+    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>, Error> {
+        verification::check_hash(&self.op, &self.hash, o)
     }
 
-    pub fn from_op(op: Op) -> Result<OpState, Error> {
-        let enc = serialize(&op).map_err(|_err| Error::LogError(LogError::SerializeError))?;
+    pub fn from_op<O: Options>(op: Op, o: O) -> Result<OpState, Error> {
+        let enc = o.serialize(&op).map_err(|_err| Error::LogError(LogError::SerializeError))?;
         let hash = verification::hash(&enc);
         Ok(OpState{
             op,
@@ -137,15 +146,15 @@ impl Debug for Op {
 pub mod tests {
     use std::io::Cursor;
 
-    use bincode::{deserialize, deserialize_from, serialize, serialize_into};
+    use bincode::{Options, deserialize, deserialize_from, serialize, serialize_into};
     
     use crate::{config::{INCLUDE_IN_HASH_TIMEOUT}, verification::{TimeTest}};
     
     use super::{Op, OpState};
     
-    pub fn make_op_late(mut op: OpState) -> OpState {
+    pub fn make_op_late<O: Options>(mut op: OpState, o: O) -> OpState {
         op.op.info.time -= INCLUDE_IN_HASH_TIMEOUT+10; // TODO this needs to be large enough to make thest test fail
-        OpState::from_op(op.op).unwrap()
+        OpState::from_op(op.op, o).unwrap()
     }
     
     #[test]
