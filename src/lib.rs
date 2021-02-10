@@ -1,15 +1,10 @@
 #![allow(dead_code)]
 mod config;
 mod errors;
-mod log;
-mod verification;
+pub mod log;
+mod rw_buf;
 mod utils;
+mod verification;
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-
-}
+mod tests {}

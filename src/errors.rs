@@ -1,11 +1,10 @@
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
-    LogError(LogError)
+    LogError(LogError),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum LogError{
+pub enum LogError {
     EOFError,
     FileError,
     FileReadError,

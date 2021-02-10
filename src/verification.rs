@@ -1,9 +1,12 @@
 // use ed25519_dalek::Signature;
-use std::{time::{SystemTime, UNIX_EPOCH}};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{config::{ARRIVED_LATE_TIMEOUT, INCLUDE_IN_HASH_TIMEOUT, Time}, errors::{Error, LogError}};
-use bincode::{Options};
-use serde::{Serialize, Deserialize};
+use crate::{
+    config::{Time, ARRIVED_LATE_TIMEOUT, INCLUDE_IN_HASH_TIMEOUT},
+    errors::{Error, LogError},
+};
+use bincode::Options;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Hash, Ord, Eq, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub struct Blake3Hash([u8; blake3::OUT_LEN]);
@@ -28,20 +31,23 @@ pub fn new_hasher() -> Hasher {
 pub struct Blake3Hasher(blake3::Hasher);
 
 impl Blake3Hasher {
-    pub fn update(&mut self,input: &[u8]) {
+    pub fn update(&mut self, input: &[u8]) {
         self.0.update(input);
     }
-    
+
     pub fn finalize(&self) -> Blake3Hash {
         cast_blake3(self.0.finalize())
     }
 }
 
-pub fn check_hash<T, O>(entry: &T, entry_hash: &Hash, o: O) -> Result<Vec<u8>, Error> where 
+pub fn check_hash<T, O>(entry: &T, entry_hash: &Hash, o: O) -> Result<Vec<u8>, Error>
+where
     T: ?Sized + serde::Serialize,
-    O: Options {
-
-    let enc = o.serialize(entry).map_err(|_err| Error::LogError(LogError::SerializeError))?;
+    O: Options,
+{
+    let enc = o
+        .serialize(entry)
+        .map_err(|_err| Error::LogError(LogError::SerializeError))?;
     let new_hash = hash(&enc);
     if *entry_hash != new_hash {
         return Err(Error::LogError(LogError::InvalidHash));
@@ -49,13 +55,11 @@ pub fn check_hash<T, O>(entry: &T, entry_hash: &Hash, o: O) -> Result<Vec<u8>, E
     Ok(enc)
 }
 
-
 pub type Hash = Blake3Hash;
 pub type Hasher = Blake3Hasher;
 
 // pub type Verify = Signature;
 pub type Id = u64;
-
 
 pub struct TimeCheck {
     pub time_not_passed: bool,
@@ -72,14 +76,16 @@ pub trait TimeInfo {
     fn arrived_time_check(&self, t: Time) -> TimeCheck {
         let time_late = {
             let n = self.now();
-            if n > t {n - t} 
-            else { // the time of the event has not yet passed
-                return TimeCheck{
+            if n > t {
+                n - t
+            } else {
+                // the time of the event has not yet passed
+                return TimeCheck {
                     time_not_passed: true,
                     include_in_hash: true,
                     arrived_late: false,
-                }
-            } 
+                };
+            }
         };
         TimeCheck {
             time_not_passed: false,
@@ -94,13 +100,18 @@ struct TimeState {
 }
 
 impl TimeInfo for TimeState {
-    
     fn now(&self) -> Time {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
     }
-        
+
     fn now_monotonic(&mut self) -> Time {
-        let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros();
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
         if t <= self.last_time {
             self.last_time += 1;
             self.last_time
@@ -116,11 +127,10 @@ pub struct TimeTest {
 }
 
 impl TimeInfo for TimeTest {
-    
     fn now(&self) -> Time {
         self.last_time
     }
-        
+
     fn now_monotonic(&mut self) -> Time {
         self.last_time += 1;
         self.last_time
@@ -129,7 +139,7 @@ impl TimeInfo for TimeTest {
 
 impl TimeTest {
     pub fn new() -> TimeTest {
-        TimeTest{
+        TimeTest {
             last_time: 10_000_000_000,
         }
     }
@@ -154,24 +164,24 @@ mod test {
     use bincode::{deserialize, serialize};
 
     use super::*;
-    
+
     #[test]
     fn hash_test() {
         let v = b"some string";
         let h = hash(v);
-        
+
         let v2 = b"some string 2";
         let h2 = hash(v2);
-        
+
         assert_ne!(h, h2);
     }
-    
+
     #[test]
     fn hasher_test() {
         let v1 = b"some string1";
         let v2 = b"some string2";
         let v3 = v1.iter().chain(v2).cloned().collect::<Vec<_>>();
-        
+
         let mut h = new_hasher();
         h.update(v1);
         h.update(v2);
@@ -189,5 +199,4 @@ mod test {
 
         assert_eq!(h, dec);
     }
-    
 }

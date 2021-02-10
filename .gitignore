@@ -1,3 +1,4 @@
 /target
 Cargo.lock
+/log_files
 *.log
