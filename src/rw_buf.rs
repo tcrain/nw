@@ -4,53 +4,33 @@ use std::{
     mem,
 };
 
+#[inline(always)]
+fn is_pow2(x: usize) -> bool {
+    x != 0 && x & (x - 1) == 0
+}
+
+#[inline(always)]
+fn modulo_pow2(x: usize, d: usize) -> usize {
+    debug_assert!(is_pow2(d));
+    debug_assert!(x & (d - 1) == x % d);
+    x & (d - 1)
+}
+
+pub trait SeekRelative {
+    fn seek_relative(&mut self, pos: i64) -> io::Result<()>;
+}
+
+pub trait RWS: Read + Write + Seek + SeekRelative {}
+impl<T: Read + Write + Seek + SeekRelative> RWS for T {}
+
 use crate::config::DEFAULT_BUF_SIZE;
 
-// when pos == cap, then we must increase cap by reading into the buffer
-// when cap == write_range.0 - 1, then we must flush the buffer
-// when flushing we always write all write buffer
-
-// if write range intersects cap, then we wrote past cap
-//   - in this case write_range.1 is the max end of the buffer
-// otw, write range is contained inside cap and cap is the end of the buffer
-// NOTE if cap == write_range.0 then we consider write_range to insersect cap
-
-// to ensure this
-// 1 - when cap reaches write_range.0 - 1 we flush the buffer
-// 2 - after writing we set pos = write_range.1
-// 3 - when write_range.1 reaches write_range.0, we must flush the buffer
-// 4 - when write_range.1 reaches cap, we write past cap
-
-// flushing the buffer -
-// when?
-// 1. on write when write_range.1 == write_range.0
-// 2. on fill when cap == write_range.0 - 1
-// how?
-// 1. seek from cap to write_range.0
-// - we always seek backward
-// 2. write from write_range.0 to write_range.1
-// 3. if write_range intersects cap (we are at new cap) set cap to write_range.1,
-//  - otw seek forward to cap
-// 4. set write_range to none
-
-// filling the buffer
-// when?
-// 1. on read when pos == m (see below how to compute m)
-// how?
-// 1. (if cap == write_range.0 - 1, then flush)
-// 2. let m = write_range.1 if write_range intersects cap, otherwise let m = cap
-// 3. Seek to m if needed
-// 4. Read upto half the size of the buffer from m until either
-//   - the end of the buffer
-//   - write_range.0 - 1
-//   - pos - 1 (can this happen?)
-
-// reading
-// 1. compute m (as in fill)
-// 2. if pos == m then fill the buff
-// 3. consume until the input buff is full or
-//    - m
-//    - end of the stored buffer
+struct WriteLocations {
+    w: WriteRange, // total start and end positions of the writes (can be larger than b_len)
+    pos: usize,    // total position in the buffer (can be larger than b_len)
+    end_w: usize,  // maximum write location (in the buffer, i.e. 0 <= end_w < b_len)
+    at_end: bool,
+}
 
 impl<W: Read + Write + Seek> Write for RWBuf<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -72,40 +52,43 @@ impl<W: Read + Write + Seek> Write for RWBuf<W> {
             }
         }
         // find the end of where we can write
-        let loc = self.compute_locations();
+        let loc = self.compute_write_locations();
+        // let loc = self.compute_locations();
         let w_len = cmp::min(buf_len, loc.end_w - self.pos);
         debug_assert!(w_len > 0);
         let w_end = self.pos + w_len;
-        // println!(
-        // "loc {:?}, buf_len {}, self pos {}, cap {:?}, w_len {}, w_end {}",
-        //loc, buf_len, self.pos, self.cap, w_len, w_end
-        //);
         self.buf[self.pos..w_end].copy_from_slice(&buf[..w_len]);
-        let (new_l, new_r) = loc.w.get_l_r().map_or((self.pos, w_end), |(l, r)| {
-            let new_l = {
-                if loc.pos < l {
-                    // we have a smaller write start
-                    loc.pos
-                } else {
-                    // we use the previous write start
-                    l
-                }
-            };
-            let w_end = loc.pos + w_len;
-            let new_r = {
-                if w_end > r {
-                    // we have a larger write end
-                    w_end
-                } else {
-                    // we use the previous write end
-                    r
-                }
-            };
-            (new_l, new_r)
-        });
+        let (new_l, new_r) = {
+            if self.write_range.is_none() {
+                (self.pos, w_end)
+            } else {
+                let (l, r) = loc.w.get_l_r().unwrap();
+                let new_l = {
+                    if loc.pos < l {
+                        // we have a smaller write start
+                        loc.pos
+                    } else {
+                        // we use the previous write start
+                        l
+                    }
+                };
+                let w_end = loc.pos + w_len;
+                let new_r = {
+                    if w_end > r {
+                        // we have a larger write end
+                        w_end
+                    } else {
+                        // we use the previous write end
+                        r
+                    }
+                };
+                (new_l, new_r)
+            }
+        };
         match self.write_range {
             WriteRange::None => {
-                if loc.at_end && new_l == self.pos {
+                if loc.at_end {
+                    //new_l == self.pos && (new_l == self.cap.get_cap()) && self.increased_pos {
                     // the write started at the end of the buffer
                     self.write_range = WriteRange::AtEnd(new_l, new_r);
                 } else {
@@ -115,13 +98,8 @@ impl<W: Read + Write + Seek> Write for RWBuf<W> {
             }
             _ => self.write_range.update(new_l, new_r),
         }
-        self.pos = (self.pos + w_len) % b_len;
+        self.pos = modulo_pow2(self.pos + w_len, b_len);
         self.check_overflow(true, b_len);
-        // let loc = self.compute_locations();
-        // println!(
-        //   "after write loc {:?}, buf_len {}, self pos {}, cap {:?}, w_len {}, w_end {}",
-        // loc, buf_len, self.pos, self.cap, w_len, w_end
-        //);
         Ok(w_len)
     }
 
@@ -138,14 +116,14 @@ impl<W: Read + Write + Seek> RWBuf<W> {
         debug_assert!(self.write_range.is_none());
         if seek_to_pos {
             // we need to seek the uderlying buffer from self.cap to self.pos
-            let loc = self.compute_locations();
+            let loc = self.compute_seek_locations();
+            // let loc = self.compute_locations();
             // compute how far ahead of the inner buffer we are
             let ahead = loc.pos as i64 - self.get_seek_cap() as i64;
             if ahead != 0 {
                 self.inner.seek(SeekFrom::Current(ahead))?;
             }
         }
-
         self.pos = 0;
         self.increased_pos = false;
         self.cap = Capacity::Partial(0);
@@ -155,50 +133,26 @@ impl<W: Read + Write + Seek> RWBuf<W> {
     // gets the offset in the inner buffer
     fn get_offset(&mut self) -> io::Result<u64> {
         let loc = self.compute_locations();
-        // println!(
-        // "loc: {:?}\n loc.pos {}, seek cap {}, off {}, my cap: {:?}",
-        //loc,
-        //loc.pos,
-        // self.get_seek_cap(),
-        // self.inner.seek(SeekFrom::Current(0))?,
-        // self.cap
-        // );
         Ok((self.inner.seek(SeekFrom::Current(0))? as i64
             + (loc.pos as i64 - self.get_seek_cap() as i64)) as u64)
     }
 
-    // writing
-    // 1. copy into stored buff until e, defined as
-    //    - end of input buff
-    //    - end of stored buff
-    //    - write_range.0
-    // 2. if write_range == None, then set write_range.0 = pos and write_range.1 = current index
-    //    - otw compute m (as in fill) and
-    //         a. if write_range intersects cap
-    //          - if pos is inside the current write range, do nothing, otw. set write_range.0 = pos
-    //          - if e is not between write_range.0 and write_range.1, then set write_range.1 to e
-    //         b. otw (write range does not intersect cap)
-    //           - if pos is not between write_range.0 and m, then set write_range.0 = pos
-    //           - if e is NOT between write_range.0 and write_range.1, set write_range.1 = e
-    // 3. update pos
-
     fn flush_inner(&mut self) -> io::Result<()> {
         if !self.write_range.is_none() {
-            // let b_len = self.buf.len();
             let cap = self.get_seek_cap();
             // compute how much we seek before writing
             // and compute how much we should seek after writing
             // if r ovewrote cap, then we do not need to seek
             // othewise we need to seek back to cap
 
-            let loc = self.compute_locations();
+            let wr = self.compute_write_range();
+            // let wr = self.compute_locations().w;
             // take out the locations
             let (l, r) = self.write_range.take().get_l_r().unwrap();
             // seek from cap to l
-            let (abs_l, abs_r) = loc.w.get_l_r().unwrap();
+            let (abs_l, abs_r) = wr.get_l_r().unwrap();
 
             let dist = abs_l as i64 - cap as i64;
-            // println!("seeking back {}", dist);
             if dist != 0 {
                 self.inner.seek(SeekFrom::Current(dist))?;
             }
@@ -219,42 +173,40 @@ impl<W: Read + Write + Seek> RWBuf<W> {
             } else {
                 // we have to seek forward to cap
                 let dist = cap as i64 - abs_r as i64;
-                // println!("seeking forward {}", dist);
                 self.inner.seek(SeekFrom::Current(dist))?;
             }
         }
         // TODO should call inner flush here?
         Ok(())
     }
+}
 
+impl<W: Read + Write + Seek> SeekRelative for RWBuf<W> {
     /// Seeks relative to the current position.
-    pub fn seek_relative(&mut self, offset: i64) -> io::Result<()> {
-        // println!("seek cap before {:?}", self.cap);
-        let loc = self.compute_locations();
-        let b_len = self.buf.len();
-        // println!(
-        //     "off {} loc {:?}, my cap {:?}, my pos {}",
-        //   offset, loc, self.cap, self.pos
-        //);
+    fn seek_relative(&mut self, offset: i64) -> io::Result<()> {
         match offset.cmp(&0) {
             cmp::Ordering::Equal => (), // no seek needed
             cmp::Ordering::Less => {
+                let loc = self.compute_seek_locations();
+                // let loc = self.compute_locations();
+                let b_len = self.buf.len();
                 let off = offset.abs() as usize;
                 // we can seek back either until cap or r, if r writes past cap
-                // let min = loc.r_is_start.unwrap_or_else(|| self.cap.get_cap());
-                // println!("seek cap {:?}", self.cap);
                 if off <= loc.pos - loc.seek_min {
-                    self.pos = (loc.pos - off) % b_len;
+                    self.pos = modulo_pow2(loc.pos - off, b_len);
                     self.check_overflow(false, b_len)
                 } else {
                     self.seek(SeekFrom::Current(offset))?;
                 }
             }
             cmp::Ordering::Greater => {
+                let loc = self.compute_seek_locations();
+                // let loc = self.compute_locations();
+                let b_len = self.buf.len();
                 let off = offset as usize;
                 // we can seek to read end
-                if off < loc.end_r - self.pos {
-                    self.pos += off % b_len;
+                if off <= loc.seek_max - loc.pos {
+                    self.pos = modulo_pow2(self.pos + off, b_len);
                     self.check_overflow(true, b_len)
                 } else {
                     self.seek(SeekFrom::Current(offset))?;
@@ -265,13 +217,6 @@ impl<W: Read + Write + Seek> RWBuf<W> {
     }
 }
 
-// before we have read capacity bytes, some of the buffer is invalid
-// for this we keep min_valid: Option<usize>.
-// when this is not None, we cannot seek backwards to before this
-
-// how to increase cap
-//
-
 #[derive(Debug, Clone, Copy)]
 enum WriteRange {
     None,
@@ -280,24 +225,29 @@ enum WriteRange {
 }
 
 impl Default for WriteRange {
+    #[inline(always)]
     fn default() -> Self {
         WriteRange::None
     }
 }
 
 impl WriteRange {
+    #[inline(always)]
     pub fn take(&mut self) -> WriteRange {
         mem::take(self)
     }
 
+    #[inline(always)]
     fn is_none(&self) -> bool {
         matches!(*self, WriteRange::None)
     }
 
+    #[inline(always)]
     fn is_at_start(&self) -> bool {
         matches!(*self, WriteRange::AtStart(_, _))
     }
 
+    #[inline(always)]
     fn is_at_end(&self) -> bool {
         matches!(*self, WriteRange::AtEnd(_, _))
     }
@@ -312,14 +262,33 @@ impl WriteRange {
         }
     }
 
-    fn update(&mut self, l: usize, r: usize) {
-        match self {
-            WriteRange::None => panic!("should not be called on none"),
-            WriteRange::AtStart(_, _) => *self = WriteRange::AtStart(l, r),
-            WriteRange::AtEnd(_, _) => *self = WriteRange::AtEnd(l, r),
+    #[inline(always)]
+    fn perform_mod(&mut self, b_len: usize) {
+        let (l, r) = match self {
+            WriteRange::None => return,
+            WriteRange::AtStart(l, r) => (l, r),
+            WriteRange::AtEnd(l, r) => (l, r),
+        };
+        if *l >= b_len {
+            *l = modulo_pow2(*l, b_len);
+        }
+        if *r >= b_len {
+            *r = modulo_pow2(*r, b_len);
         }
     }
 
+    #[inline(always)]
+    fn update(&mut self, l: usize, r: usize) {
+        if let WriteRange::AtStart(old_l, old_r) = self {
+            *old_l = l;
+            *old_r = r;
+        } else if let WriteRange::AtEnd(old_l, old_r) = self {
+            *old_l = l;
+            *old_r = r;
+        }
+    }
+
+    #[inline(always)]
     fn update_copy(self, l: usize, r: usize) -> WriteRange {
         match self {
             WriteRange::None => panic!("should not be called on none"),
@@ -328,6 +297,7 @@ impl WriteRange {
         }
     }
 
+    #[inline(always)]
     fn get_l_r(&self) -> Option<(usize, usize)> {
         match self {
             WriteRange::None => None,
@@ -337,32 +307,13 @@ impl WriteRange {
     }
 }
 
-pub struct RWBuf<R> {
+pub struct RWBuf<R: Read + Write + Seek> {
     inner: R,
     buf: Box<[u8]>,
     pos: usize,              // position of the reader in the buffer
     increased_pos: bool,     // true if the last operation moved forward in the buffer
     cap: Capacity,           // position of inner reader in the buffer
     write_range: WriteRange, // if the write range goes past cap
-}
-
-impl<R: Read> RWBuf<R> {
-    pub fn new(inner: R) -> RWBuf<R> {
-        RWBuf::with_capacity(DEFAULT_BUF_SIZE, inner)
-    }
-
-    /// Creates a new `BufReader<R>` with the specified buffer capacity.
-    pub fn with_capacity(capacity: usize, inner: R) -> RWBuf<R> {
-        let buffer = vec![0; capacity];
-        RWBuf {
-            inner,
-            buf: buffer.into_boxed_slice(),
-            pos: 0,
-            increased_pos: false,
-            cap: Capacity::Partial(0),
-            write_range: WriteRange::None,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -399,17 +350,48 @@ struct Locations {
     end_r: usize,  // maximum read location (in the buffer, i.e. 0 <= end_r < b_len)
     // minimum seek position, will either be 0 if the buf is not full, or cap if it is full and r does not overwrite cap, or self.w.1 - b_len (b_len less than the actual position of the end of the write)
     seek_min: usize,
+    // maximum seek position
+    seek_max: usize,
     at_end: bool, // true if we are at the end of the buffer
-                  // cap: usize, // position of cap relative to the other values (this is either the original cap, or cap + b_len)
-                  // seek_cap: usize, // seeking loc.pos as i64 - loc.seek_cap as i64 in the inner buffer puts the inner buffer at offset pos
 }
 
-impl<R> RWBuf<R> {
+struct ReadLocations {
+    end_r: usize, // maximum read location (in the buffer, i.e. 0 <= end_r < b_len)
+    at_end: bool, // true if we are at the end of the buffer
+}
+
+struct SeekLocations {
+    pos: usize, // total position in the buffer (can be larger than b_len)
+    seek_min: usize,
+    // maximum seek position
+    seek_max: usize,
+}
+
+impl<R: Read + Write + Seek> RWBuf<R> {
+    pub fn new(inner: R) -> RWBuf<R> {
+        RWBuf::with_capacity(DEFAULT_BUF_SIZE, inner)
+    }
+
+    /// Creates a new `BufReader<R>` with the specified buffer capacity.
+    pub fn with_capacity(capacity: usize, inner: R) -> RWBuf<R> {
+        assert!(is_pow2(capacity));
+        let buffer = vec![0; capacity];
+        RWBuf {
+            inner,
+            buf: buffer.into_boxed_slice(),
+            pos: 0,
+            increased_pos: false,
+            cap: Capacity::Partial(0),
+            write_range: WriteRange::None,
+        }
+    }
+
     /// Returns the number of bytes the internal buffer can hold at once.
     pub fn capacity(&self) -> usize {
         self.buf.len()
     }
 
+    #[inline]
     fn check_overflow(&mut self, increased_pos: bool, b_len: usize) {
         // if we have loaded or written to the end of the buffer, then we are now full
         if let Capacity::Partial(cap) = self.cap {
@@ -430,14 +412,11 @@ impl<R> RWBuf<R> {
             self.cap.update(0);
         }
         self.increased_pos = increased_pos;
-        if let Some((l, r)) = self.write_range.get_l_r() {
-            if r >= b_len || l >= b_len {
-                self.write_range.update(l % b_len, r % b_len);
-            }
-        }
+        self.write_range.perform_mod(b_len);
     }
 
     /// returns the cap, when used for seeking
+    #[inline(always)]
     fn get_seek_cap(&self) -> usize {
         let cap = self.cap.get_cap();
         if self.cap.is_partial() {
@@ -455,6 +434,7 @@ impl<R> RWBuf<R> {
 
     /// compute the write locations, and the buffer position, based on the current value of self.cap,
     /// (without taking the modulos when they would overlap the buffer)
+    #[inline(always)]
     fn compute_locations(&mut self) -> Locations {
         let b_len = self.buf.len();
         let cap = match self.cap {
@@ -463,13 +443,13 @@ impl<R> RWBuf<R> {
                     .write_range
                     .get_l_r()
                     .map_or(cap, |(_, r)| cmp::max(cap, r));
-                // println!("cap {}, pos {}, end_r {}", cap, self.pos, end_r);
                 return Locations {
                     w: self.write_range,
                     pos: self.pos,
                     end_w: b_len,
                     end_r,
                     seek_min: 0,
+                    seek_max: end_r,
                     at_end: end_r == self.pos,
                     // seek_cap: cap,
                 };
@@ -491,6 +471,7 @@ impl<R> RWBuf<R> {
                     pos,
                     end_w: b_len,
                     end_r,
+                    seek_max: cap + b_len,
                     seek_min: cap, // we can seek back to cap
                     at_end,
                     // seek_cap: cap + b_len,
@@ -509,18 +490,20 @@ impl<R> RWBuf<R> {
                                 (self.pos, b_len, false)
                             }
                         };
+                        let seek_min = {
+                            if r > cap {
+                                r
+                            } else {
+                                cap
+                            }
+                        };
                         Locations {
                             w: self.write_range.update_copy(l + b_len, r + b_len),
                             pos,
                             end_w: b_len,
                             end_r,
-                            seek_min: {
-                                if r > cap {
-                                    r
-                                } else {
-                                    cap
-                                }
-                            },
+                            seek_max: seek_min + b_len,
+                            seek_min,
                             at_end,
                         }
                     } else {
@@ -539,6 +522,7 @@ impl<R> RWBuf<R> {
                             pos,
                             end_w,
                             end_r,
+                            seek_max: r + b_len + b_len,
                             seek_min: r + b_len,
                             at_end,
                         }
@@ -547,7 +531,6 @@ impl<R> RWBuf<R> {
                     // the end of the buffer is r
                     let (pos, end_w, end_r, at_end) = {
                         let at_cap = self.pos == r;
-                        // println!("pos {}, r {}", self.pos, r);
                         if self.pos < r || (at_cap && self.increased_pos) {
                             // pos overlaps the buffer
                             if r <= l {
@@ -574,6 +557,7 @@ impl<R> RWBuf<R> {
                         pos,
                         end_w,
                         end_r,
+                        seek_max: new_r,
                         seek_min: new_r - b_len,
                         at_end,
                     }
@@ -588,7 +572,7 @@ impl<R> RWBuf<R> {
                         }
                     };
                     Locations {
-                        w: self.write_range.update_copy(l, r),
+                        w: self.write_range,
                         pos,
                         end_w: {
                             if self.pos < l {
@@ -598,15 +582,13 @@ impl<R> RWBuf<R> {
                             }
                         },
                         end_r,
+                        seek_max: cap + b_len,
                         seek_min: cap,
                         at_end,
                     }
                 } else {
                     // just the end of the write overlaps the buffer
                     let m = cmp::max(cap, r);
-                    if l == 0 && r == 0 {
-                        // println!("here");
-                    }
                     let (pos, end_w, end_r, at_end) = {
                         let at_m = self.pos == m;
                         if self.pos < m || (at_m && self.increased_pos) {
@@ -616,19 +598,515 @@ impl<R> RWBuf<R> {
                             (self.pos, b_len, b_len, false)
                         }
                     };
+                    let seek_min = {
+                        if r > cap {
+                            r
+                        } else {
+                            cap
+                        }
+                    };
                     Locations {
                         w: self.write_range.update_copy(l, r + b_len),
                         pos,
+                        seek_max: seek_min + b_len,
+                        seek_min,
                         end_w,
                         end_r,
-                        seek_min: {
+                        at_end,
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compute_write_locations(&mut self) -> WriteLocations {
+        let b_len = self.buf.len();
+        let cap = match self.cap {
+            Capacity::Partial(cap) => {
+                let end_r = self
+                    .write_range
+                    .get_l_r()
+                    .map_or(cap, |(_, r)| cmp::max(cap, r));
+                return WriteLocations {
+                    w: self.write_range,
+                    pos: self.pos,
+                    end_w: b_len,
+                    at_end: end_r == self.pos,
+                    // seek_cap: cap,
+                };
+            }
+            Capacity::Full(cap) => cap,
+        };
+        match self.write_range.get_l_r() {
+            None => {
+                let (pos, at_end) = {
+                    let at_cap = self.pos == cap;
+                    if self.pos < cap || (at_cap && self.increased_pos) {
+                        (self.pos + b_len, at_cap)
+                    } else {
+                        (self.pos, false)
+                    }
+                };
+                WriteLocations {
+                    w: WriteRange::None,
+                    pos,
+                    end_w: b_len,
+                    at_end,
+                }
+            }
+            Some((l, r)) => {
+                if l < cap {
+                    if r > l {
+                        // the start of the write overlaps the buffer
+                        let m = cmp::max(cap, r);
+                        let (pos, at_end) = {
+                            let at_m = self.pos == m;
+                            if self.pos < m || (at_m && self.increased_pos) {
+                                (self.pos + b_len, at_m)
+                            } else {
+                                (self.pos, false)
+                            }
+                        };
+                        WriteLocations {
+                            w: self.write_range.update_copy(l + b_len, r + b_len),
+                            pos,
+                            end_w: b_len,
+                            at_end,
+                        }
+                    } else {
+                        // the end of the write buffer overlaps twice
+                        let (pos, end_w, at_end) = {
+                            let at_r = self.pos == r;
+                            if self.pos < r || (at_r && self.increased_pos) {
+                                // we cannot write past l, since then we would overwrite the written buffer
+                                (self.pos + b_len + b_len, l, at_r)
+                            } else {
+                                (self.pos + b_len, b_len, false)
+                            }
+                        };
+                        WriteLocations {
+                            w: self.write_range.update_copy(l + b_len, r + b_len + b_len),
+                            pos,
+                            end_w,
+                            at_end,
+                        }
+                    }
+                } else if l == cap && self.write_range.is_at_end() {
+                    // the end of the buffer is r
+                    let (pos, end_w, at_end) = {
+                        let at_cap = self.pos == r;
+                        if self.pos < r || (at_cap && self.increased_pos) {
+                            // pos overlaps the buffer
+                            if r <= l {
+                                // pos overlaps twice
+                                (self.pos + b_len + b_len, l, at_cap)
+                            } else {
+                                (self.pos + b_len, b_len, at_cap)
+                            }
+                        } else if r <= l {
+                            (self.pos + b_len, b_len, false)
+                        } else {
+                            (self.pos, b_len, false)
+                        }
+                    };
+                    let (new_l, new_r) = (l + b_len, {
+                        if r <= l {
+                            r + b_len + b_len
+                        } else {
+                            r + b_len
+                        }
+                    });
+                    WriteLocations {
+                        w: self.write_range.update_copy(new_l, new_r),
+                        pos,
+                        end_w,
+                        at_end,
+                    }
+                } else if r > l {
+                    // the write does not overlap the buffer
+                    let (pos, at_end) = {
+                        let at_cap = self.pos == cap;
+                        if self.pos < cap || (at_cap && self.increased_pos) {
+                            (self.pos + b_len, at_cap)
+                        } else {
+                            (self.pos, false)
+                        }
+                    };
+                    WriteLocations {
+                        w: self.write_range,
+                        pos,
+                        end_w: {
+                            if self.pos < l {
+                                l
+                            } else {
+                                b_len
+                            }
+                        },
+                        at_end,
+                    }
+                } else {
+                    // just the end of the write overlaps the buffer
+                    let m = cmp::max(cap, r);
+                    let (pos, end_w, at_end) = {
+                        let at_m = self.pos == m;
+                        if self.pos < m || (at_m && self.increased_pos) {
+                            // we cannot write past l, since then we would overwrite the written buffer
+                            (self.pos + b_len, l, at_m)
+                        } else {
+                            (self.pos, b_len, false)
+                        }
+                    };
+                    WriteLocations {
+                        w: self.write_range.update_copy(l, r + b_len),
+                        pos,
+                        end_w,
+                        at_end,
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compute_write_range(&mut self) -> WriteRange {
+        let b_len = self.buf.len();
+        let cap = match self.cap {
+            Capacity::Partial(_) => return self.write_range,
+            Capacity::Full(cap) => cap,
+        };
+        match self.write_range.get_l_r() {
+            None => WriteRange::None,
+            Some((l, r)) => {
+                if l < cap {
+                    if r > l {
+                        self.write_range.update_copy(l + b_len, r + b_len)
+                    } else {
+                        self.write_range.update_copy(l + b_len, r + b_len + b_len)
+                    }
+                } else if l == cap && self.write_range.is_at_end() {
+                    // the end of the buffer is r
+                    let (new_l, new_r) = (l + b_len, {
+                        if r <= l {
+                            r + b_len + b_len
+                        } else {
+                            r + b_len
+                        }
+                    });
+                    self.write_range.update_copy(new_l, new_r)
+                } else if r > l {
+                    // the write does not overlap the buffer
+                    self.write_range
+                } else {
+                    // just the end of the write overlaps the buffer
+                    self.write_range.update_copy(l, r + b_len)
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compute_read_locations(&mut self) -> ReadLocations {
+        let b_len = self.buf.len();
+        let cap = match self.cap {
+            Capacity::Partial(cap) => {
+                let end_r = self
+                    .write_range
+                    .get_l_r()
+                    .map_or(cap, |(_, r)| cmp::max(cap, r));
+                return ReadLocations {
+                    end_r,
+                    at_end: end_r == self.pos,
+                };
+            }
+            Capacity::Full(cap) => cap,
+        };
+        match self.write_range.get_l_r() {
+            None => {
+                let (end_r, at_end) = {
+                    let at_cap = self.pos == cap;
+                    if self.pos < cap || (at_cap && self.increased_pos) {
+                        (cap, at_cap)
+                    } else {
+                        (b_len, false)
+                    }
+                };
+                ReadLocations {
+                    end_r,
+                    at_end,
+                    // seek_cap: cap + b_len,
+                }
+            }
+            Some((l, r)) => {
+                if l < cap {
+                    if r > l {
+                        // the start of the write overlaps the buffer
+                        let m = cmp::max(cap, r);
+                        let (end_r, at_end) = {
+                            let at_m = self.pos == m;
+                            if self.pos < m || (at_m && self.increased_pos) {
+                                (m, at_m)
+                            } else {
+                                (b_len, false)
+                            }
+                        };
+                        ReadLocations { end_r, at_end }
+                    } else {
+                        // the end of the write buffer overlaps twice
+                        let (end_r, at_end) = {
+                            let at_r = self.pos == r;
+                            if self.pos < r || (at_r && self.increased_pos) {
+                                // we cannot write past l, since then we would overwrite the written buffer
+                                (r, at_r)
+                            } else {
+                                (b_len, false)
+                            }
+                        };
+                        ReadLocations { end_r, at_end }
+                    }
+                } else if l == cap && self.write_range.is_at_end() {
+                    // the end of the buffer is r
+                    let (end_r, at_end) = {
+                        let at_cap = self.pos == r;
+                        if self.pos < r || (at_cap && self.increased_pos) {
+                            // pos overlaps the buffer
+                            (r, at_cap)
+                        } else {
+                            (b_len, false)
+                        }
+                    };
+                    ReadLocations { end_r, at_end }
+                } else if r > l {
+                    // the write does not overlap the buffer
+                    let (end_r, at_end) = {
+                        let at_cap = self.pos == cap;
+                        if self.pos < cap || (at_cap && self.increased_pos) {
+                            (cap, at_cap)
+                        } else {
+                            (b_len, false)
+                        }
+                    };
+                    ReadLocations { end_r, at_end }
+                } else {
+                    // just the end of the write overlaps the buffer
+                    let m = cmp::max(cap, r);
+                    let (end_r, at_end) = {
+                        let at_m = self.pos == m;
+                        if self.pos < m || (at_m && self.increased_pos) {
+                            // we cannot write past l, since then we would overwrite the written buffer
+                            (m, at_m)
+                        } else {
+                            (b_len, false)
+                        }
+                    };
+                    ReadLocations { end_r, at_end }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compute_seek_locations(&mut self) -> SeekLocations {
+        let b_len = self.buf.len();
+        let cap = match self.cap {
+            Capacity::Partial(cap) => {
+                let end_r = self
+                    .write_range
+                    .get_l_r()
+                    .map_or(cap, |(_, r)| cmp::max(cap, r));
+                return SeekLocations {
+                    pos: self.pos,
+                    seek_min: 0,
+                    seek_max: end_r,
+                };
+            }
+            Capacity::Full(cap) => cap,
+        };
+        match self.write_range.get_l_r() {
+            None => {
+                let pos = {
+                    let at_cap = self.pos == cap;
+                    if self.pos < cap || (at_cap && self.increased_pos) {
+                        self.pos + b_len
+                    } else {
+                        self.pos
+                    }
+                };
+                SeekLocations {
+                    pos,
+                    seek_max: cap + b_len,
+                    seek_min: cap, // we can seek back to cap
+                }
+            }
+            Some((l, r)) => {
+                if l < cap {
+                    if r > l {
+                        // the start of the write overlaps the buffer
+                        let m = cmp::max(cap, r);
+                        let pos = {
+                            let at_m = self.pos == m;
+                            if self.pos < m || (at_m && self.increased_pos) {
+                                self.pos + b_len
+                            } else {
+                                self.pos
+                            }
+                        };
+                        let seek_min = {
                             if r > cap {
                                 r
                             } else {
                                 cap
                             }
-                        },
-                        at_end,
+                        };
+                        SeekLocations {
+                            pos,
+                            seek_max: seek_min + b_len,
+                            seek_min,
+                        }
+                    } else {
+                        // the end of the write buffer overlaps twice
+                        let pos = {
+                            let at_r = self.pos == r;
+                            if self.pos < r || (at_r && self.increased_pos) {
+                                // we cannot write past l, since then we would overwrite the written buffer
+                                self.pos + b_len + b_len
+                            } else {
+                                self.pos + b_len
+                            }
+                        };
+                        SeekLocations {
+                            pos,
+                            seek_max: r + b_len + b_len,
+                            seek_min: r + b_len,
+                        }
+                    }
+                } else if l == cap && self.write_range.is_at_end() {
+                    // the end of the buffer is r
+                    let pos = {
+                        let at_cap = self.pos == r;
+                        if self.pos < r || (at_cap && self.increased_pos) {
+                            // pos overlaps the buffer
+                            if r <= l {
+                                // pos overlaps twice
+                                self.pos + b_len + b_len
+                            } else {
+                                self.pos + b_len
+                            }
+                        } else if r <= l {
+                            self.pos + b_len
+                        } else {
+                            self.pos
+                        }
+                    };
+                    let new_r = {
+                        if r <= l {
+                            r + b_len + b_len
+                        } else {
+                            r + b_len
+                        }
+                    };
+                    SeekLocations {
+                        pos,
+                        seek_max: new_r,
+                        seek_min: new_r - b_len,
+                    }
+                } else if r > l {
+                    // the write does not overlap the buffer
+                    let pos = {
+                        let at_cap = self.pos == cap;
+                        if self.pos < cap || (at_cap && self.increased_pos) {
+                            self.pos + b_len
+                        } else {
+                            self.pos
+                        }
+                    };
+                    SeekLocations {
+                        pos,
+                        seek_max: cap + b_len,
+                        seek_min: cap,
+                    }
+                } else {
+                    // just the end of the write overlaps the buffer
+                    let m = cmp::max(cap, r);
+                    let pos = {
+                        let at_m = self.pos == m;
+                        if self.pos < m || (at_m && self.increased_pos) {
+                            // we cannot write past l, since then we would overwrite the written buffer
+                            self.pos + b_len
+                        } else {
+                            self.pos
+                        }
+                    };
+                    let seek_min = {
+                        if r > cap {
+                            r
+                        } else {
+                            cap
+                        }
+                    };
+                    SeekLocations {
+                        pos,
+                        seek_max: seek_min + b_len,
+                        seek_min,
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn compute_end_w(&mut self) -> usize {
+        let b_len = self.buf.len();
+        let cap = match self.cap {
+            Capacity::Partial(_) => return b_len,
+            Capacity::Full(cap) => cap,
+        };
+        match self.write_range.get_l_r() {
+            None => b_len,
+            Some((l, r)) => {
+                if l < cap {
+                    if r > l {
+                        // the start of the write overlaps the buffer
+                        b_len
+                    } else {
+                        let at_r = self.pos == r;
+                        if self.pos < r || (at_r && self.increased_pos) {
+                            // we cannot write past l, since then we would overwrite the written buffer
+                            l
+                        } else {
+                            b_len
+                        }
+                    }
+                } else if l == cap && self.write_range.is_at_end() {
+                    // the end of the buffer is r
+                    let at_cap = self.pos == r;
+                    if self.pos < r || (at_cap && self.increased_pos) {
+                        // pos overlaps the buffer
+                        if r <= l {
+                            // pos overlaps twice
+                            l
+                        } else {
+                            b_len
+                        }
+                    } else {
+                        b_len
+                    }
+                } else if r > l {
+                    // the write does not overlap the buffer
+                    if self.pos < l {
+                        l
+                    } else {
+                        b_len
+                    }
+                } else {
+                    // just the end of the write overlaps the buffer
+                    let m = cmp::max(cap, r);
+                    let at_m = self.pos == m;
+                    if self.pos < m || (at_m && self.increased_pos) {
+                        // we cannot write past l, since then we would overwrite the written buffer
+                        l
+                    } else {
+                        b_len
                     }
                 }
             }
@@ -643,13 +1121,10 @@ impl<R: Read + Write + Seek> Read for RWBuf<R> {
             return Ok(0);
         }
         let b_len = self.buf.len();
-        let loc = self.compute_locations();
+        let loc = self.compute_read_locations();
+        // let loc = self.compute_locations();
         let end_r = {
             if loc.at_end {
-                // println!(
-                //      "pos {}, loc pos {}, loc {:#?}, cap {:?}",
-                //    self.pos, loc.pos, loc, self.cap
-                //);
                 // we have consumed the full buffer and need to read new values
                 // first flush the writes so we can read as much as we want
                 self.flush_inner()?;
@@ -661,10 +1136,17 @@ impl<R: Read + Write + Seek> Read for RWBuf<R> {
                     return self.inner.read(buf);
                 }
                 // we need to fill the buffer
-                // TODO how much should we read
-                // let cap = self.cap.get_cap();
                 debug_assert!(self.pos == loc.end_r);
-                let n = self.inner.read(&mut self.buf[self.pos..])?;
+                // we only want to read half the buffer at most, so we can still seek backwards
+                let end_pos = {
+                    if self.cap.is_partial() {
+                        // we should fill the buffer
+                        b_len
+                    } else {
+                        cmp::min(b_len / 2, b_len - self.pos) + self.pos
+                    }
+                };
+                let n = self.inner.read(&mut self.buf[self.pos..end_pos])?;
                 if n == 0 {
                     // the inner buffer has no new value to read
                     return Ok(0);
@@ -681,21 +1163,30 @@ impl<R: Read + Write + Seek> Read for RWBuf<R> {
         let new_pos = self.pos + nread;
         debug_assert!(new_pos <= b_len);
         buf[..nread].copy_from_slice(&self.buf[self.pos..new_pos]);
+        if new_pos > b_len {
+            panic!();
+        }
         self.pos = new_pos;
         self.check_overflow(true, b_len);
         Ok(nread)
     }
 }
 
-impl<R> fmt::Debug for RWBuf<R>
+impl<R: Read + Write + Seek> fmt::Debug for RWBuf<R>
 where
     R: fmt::Debug,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.debug_struct("BufReader")
+        fmt.debug_struct("RWBuf")
             .field("reader", &self.inner)
             .field("buffer", &format_args!("{}/{}", self.pos, self.buf.len()))
             .finish()
+    }
+}
+
+impl<W: Read + Write + Seek> Drop for RWBuf<W> {
+    fn drop(&mut self) {
+        let _ = self.flush();
     }
 }
 
@@ -713,17 +1204,10 @@ impl<R: Read + Write + Seek> Seek for RWBuf<R> {
         self.flush_inner()?;
         let result: u64;
         if let SeekFrom::Current(n) = pos {
-            let loc = self.compute_locations();
+            let loc = self.compute_seek_locations();
+            // let loc = self.compute_locations();
             // compute how far ahead of the inner buffer we are
-            // let ahead = loc.pos as i64 - self.get_seek_cap() as i64;
             let ahead = self.get_seek_cap() as i64 - loc.pos as i64;
-            // println!(
-            //    "loc.pos {}, seek cap {}, ahead {}, seek {}",
-            //  loc.pos,
-            //                self.get_seek_cap(),
-            //              ahead,
-            //            n - ahead
-            //      );
             result = self.inner.seek(SeekFrom::Current(n - ahead))?;
         } else {
             // Seeking with Start/End doesn't care about our buffer length.
@@ -744,12 +1228,12 @@ mod test {
         path::Path,
     };
 
-    use log::info;
+    use log::debug;
     use rand::{prelude::StdRng, Rng, SeedableRng};
 
     use crate::utils::gen_rand;
 
-    use super::RWBuf;
+    use super::{RWBuf, SeekRelative};
 
     struct MultiRW {
         rw_buf: RWBuf<File>,
@@ -760,13 +1244,6 @@ mod test {
     struct Info {
         size: u64,
         offset: u64,
-    }
-
-    impl Drop for MultiRW {
-        fn drop(&mut self) {
-            self.flush()
-                .unwrap_or_else(|e| info!("Error flushing buffer: {}", e))
-        }
     }
 
     impl MultiRW {
@@ -837,7 +1314,7 @@ mod test {
             let v2 = self.rw_buf.read_to_end(&mut buf2);
             check_equal(&v1, &v2, "read size");
 
-            // println!("check buf sizes {}, {}", buf1.len(), buf2.len());
+            debug!("check buf sizes {}, {}", buf1.len(), buf2.len());
 
             assert_eq!(buf1, buf2);
         }
@@ -848,7 +1325,9 @@ mod test {
             self.rw.seek(SeekFrom::Start(offset)).unwrap();
             Info { size, offset }
         }
+    }
 
+    impl SeekRelative for MultiRW {
         fn seek_relative(&mut self, pos: i64) -> Result<()> {
             let v1 = self.rw_buf.seek_relative(pos);
             let v2 = self.rw.seek(SeekFrom::Current(pos));
@@ -870,10 +1349,10 @@ mod test {
         }
     }
 
-    fn check_equal<T: Eq + Debug>(v1: &Result<T>, v2: &Result<T>, _name: &str) {
+    fn check_equal<T: Eq + Debug>(v1: &Result<T>, v2: &Result<T>, name: &str) {
         match v1 {
             Ok(n) => {
-                // println!("{} check equal {:?}, {:?}", name, n, v2.as_ref().unwrap());
+                debug!("{} check equal {:?}, {:?}", name, n, v2.as_ref().unwrap());
                 assert_eq!(n, v2.as_ref().unwrap());
             }
             Err(e) => assert_eq!(e.kind(), v2.as_ref().unwrap_err().kind()),
@@ -917,9 +1396,9 @@ mod test {
     }
 
     #[test]
-    fn write() {
+    fn write_buf() {
         let mut rng = StdRng::seed_from_u64(100);
-        let b_len = 100;
+        let b_len = 128;
         let path_string = "log_files/rw_buff1";
         let mut rw = MultiRW::new(b_len, path_string);
         rw.check_buf();
@@ -942,7 +1421,7 @@ mod test {
 
         let mut rw = MultiRW::new(b_len, path_string);
         // write and only check at the end
-        for i in 0..10 {
+        for _i in 0..10 {
             rw.write_all(&gen_rand(11, &mut rng)).unwrap();
         }
         rw.check_buf();
@@ -955,7 +1434,7 @@ mod test {
         let v = gen_rand(10, &mut rng);
         let v_orign = v.clone();
         let path_string = "log_files/rw_buff2";
-        let mut rw = MultiRW::with_capacity(100, path_string, v);
+        let mut rw = MultiRW::with_capacity(128, path_string, v);
         rw.check_buf();
 
         // we should read no bytes
@@ -981,7 +1460,7 @@ mod test {
         // try with a bigger buffer
         let v = gen_rand(200, &mut rng);
         let v_orign = v.clone();
-        let mut rw = MultiRW::with_capacity(100, path_string, v);
+        let mut rw = MultiRW::with_capacity(128, path_string, v);
         rw.check_buf();
 
         rw.seek_start();
@@ -992,35 +1471,124 @@ mod test {
 
     #[test]
     fn read_seek() {
-        let b_len = 100;
-        let mut rw = MultiRW::new(b_len, "log_files/rw_buff3");
-        rw.check_buf();
-        rw.seek_relative(100).unwrap();
+        let b_len = 128;
+        let mut rng = StdRng::seed_from_u64(101);
+        let v = gen_rand(1000, &mut rng);
+        let mut rw = MultiRW::with_capacity(b_len, "log_files/rw_buff3", v);
+
+        // fill the buffer
+        rw.read_exact(&mut [0; 10]).unwrap();
+        // seek forward
+        rw.seek_relative(50).unwrap();
+        // read around buffer
+        rw.read_exact(&mut [0; 80]).unwrap();
+        // seek backwards
+        rw.seek_relative(-20).unwrap();
+        rw.read_exact(&mut [0; 30]).unwrap();
         rw.check_buf();
     }
 
     #[test]
+    fn read_write_seek() {
+        let b_len = 128;
+        let mut rng = StdRng::seed_from_u64(101);
+        let v = gen_rand(1000, &mut rng);
+        let mut rw = MultiRW::with_capacity(b_len, "log_files/rw_buff4", v);
+
+        // start with a write
+        rw.write_all(&gen_rand(10, &mut rng)).unwrap();
+        // seek forward
+        rw.seek_relative(50).unwrap();
+        // write around buffer
+        rw.write_all(&gen_rand(80, &mut rng)).unwrap();
+
+        // seek backwards
+        rw.seek_relative(-20).unwrap();
+        rw.read_exact(&mut [0; 30]).unwrap();
+        rw.check_buf();
+
+        let v = gen_rand(1000, &mut rng);
+        let mut rw = MultiRW::with_capacity(b_len, "log_files/rw_buff4", v);
+        // read until the middle of the buffer
+        rw.read_exact(&mut [0; 50]).unwrap();
+        // write
+        rw.write_all(&gen_rand(10, &mut rng)).unwrap();
+        // seek back
+        rw.seek_relative(-20).unwrap();
+        // write
+        rw.write_all(&gen_rand(30, &mut rng)).unwrap();
+        // seek forward
+        rw.seek_relative(10).unwrap();
+        // write around the buffer
+        rw.write_all(&gen_rand(50, &mut rng)).unwrap();
+        // write enough to flush
+        rw.write_all(&gen_rand(200, &mut rng)).unwrap();
+        rw.check_buf();
+
+        let v = gen_rand(1000, &mut rng);
+        let mut rw = MultiRW::with_capacity(b_len, "log_files/rw_buff4", v);
+        // read until the middle of the buffer
+        rw.read_exact(&mut [0; 50]).unwrap();
+        // write
+        rw.write_all(&gen_rand(10, &mut rng)).unwrap();
+        // read around so we update cap
+        rw.read_exact(&mut [0; 80]).unwrap();
+        // write so we flush the old write
+        rw.write_all(&gen_rand(90, &mut rng)).unwrap();
+        // seek back
+        rw.seek_relative(-90).unwrap();
+        rw.read_exact(&mut [0; 90]).unwrap();
+        rw.check_buf();
+    }
+
+    #[test]
+    fn rand_op_initial_large() {
+        let b_len = 128;
+        let mut rng = StdRng::seed_from_u64(101);
+        // start with a large initial value smaller than the buffer
+        let v = gen_rand(1000, &mut rng);
+        let rw = MultiRW::with_capacity(b_len, "log_files/rw_buff5", v);
+        run_rand_op(rw, b_len, rng);
+    }
+
+    #[test]
+    fn rand_op_initial_small() {
+        let b_len = 128;
+        let mut rng = StdRng::seed_from_u64(102);
+        // start with a small initial value smaller than the buffer
+        let v = gen_rand(10, &mut rng);
+        let rw = MultiRW::with_capacity(b_len, "log_files/rw_buff6", v);
+        run_rand_op(rw, b_len, rng);
+    }
+
+    #[test]
     fn rand_op() {
-        let mut rng = StdRng::seed_from_u64(100);
-        let b_len = 100;
-        let mut rw = MultiRW::new(b_len, "log_files/rw_buff4");
+        let b_len = 128;
+        let rng = StdRng::seed_from_u64(103);
+        // start with a large initial value smaller than the buffer
+        let rw = MultiRW::new(b_len, "log_files/rw_buff7");
+        run_rand_op(rw, b_len, rng);
+    }
+
+    fn run_rand_op(mut rw: MultiRW, b_len: usize, mut rng: StdRng) {
         let num_ops = 1000;
 
         // run 100 different iterations
-        for _j in 0..100 {
-            // println!("perform iteration {}", j);
-            for _i in 0..num_ops {
+        for j in 0..100 {
+            debug!("perform iteration {}", j);
+            rw.seek_start();
+            for i in 0..num_ops {
                 match rng.gen_range(0..100) {
                     0..=59 => {
                         // read
                         let mut v = vec![0; rng.gen_range(0..(2 * b_len))];
-                        //println!("perform op {}, read {}", i, v.len());
+                        debug!("perform op {}, read {}", i, v.len());
                         let _ = rw.read(&mut v).unwrap();
                     }
                     60..=89 => {
                         // write
                         let v = gen_rand(rng.gen_range(0..(2 * b_len)), &mut rng);
-                        //println!("perform op {}, write {}", i, v.len());
+                        debug!("perform op {}, write {}", i, v.len());
                         rw.write_all(&v).unwrap();
                     }
                     90..=99 => {
@@ -1031,10 +1599,10 @@ mod test {
                         let max_range =
                             cmp::min(inf.size as i64 - inf.offset as i64, 3 * b_len as i64);
                         let seek_size = rng.gen_range(min_range..max_range);
-                        //println!(
-                        //  "perform op {}, seek {} ({}, {}), info: {:?}",
-                        //i, seek_size, min_range, max_range, inf
-                        //);
+                        debug!(
+                            "perform op {}, seek {} ({}, {}), info: {:?}",
+                            i, seek_size, min_range, max_range, inf
+                        );
                         rw.seek_relative(seek_size).unwrap();
                     }
                     _ => {
@@ -1049,8 +1617,8 @@ mod test {
     #[test]
     fn read_write() {
         let mut rng = StdRng::seed_from_u64(100);
-        let b_len = 100;
-        let path_string = "log_files/rw_buff5";
+        let b_len = 128;
+        let path_string = "log_files/rw_buff8";
 
         // write, seek back, read part of it, overwrite
         let mut rw = MultiRW::new(b_len, path_string);
@@ -1094,7 +1662,7 @@ mod test {
         // double overlap
         // start with a file of size 150
         // read 50, 2 times - then 40, so we are 10 before cap
-        let mut rw = MultiRW::with_capacity(100, path_string, gen_rand(150, &mut rng));
+        let mut rw = MultiRW::with_capacity(b_len, path_string, gen_rand(150, &mut rng));
         rw.read_exact(&mut [0; 50]).unwrap();
         rw.read_exact(&mut [0; 50]).unwrap();
         rw.read_exact(&mut [0; 40]).unwrap();

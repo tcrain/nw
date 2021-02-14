@@ -10,6 +10,8 @@ pub enum LogError {
     FileReadError,
     FileWriteError,
     FileSeekError,
+    FileSeekPastEndError,
+    FileSeekBeforeStartError,
     SerializeError,
     DeserializeError,
     NoNewOps,

@@ -6,8 +6,9 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+
 [dependencies]
-log = "0.4"
+log = { version = "0.4", features = ["std"] }
 rand = "0.8"
 blake3 = "0.3.7"
 itertools = "0.10.0"
@@ -24,4 +25,5 @@ name = "bench"
 harness = false
 
 [profile.release]
-debug = true
+debug = false
+opt-level = 3

@@ -1,19 +1,21 @@
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, SeekFrom, Write},
     path::Path,
-    vec,
 };
 
 use bincode::{options, DefaultOptions, Options};
 use log::{error, info};
 
-use crate::errors::{Error, LogError};
+use crate::{
+    errors::{Error, LogError},
+    rw_buf::RWS,
+};
 
 struct FileWriter<T> {
     // written: Vec<u8>,
     bytes_written: usize,
-    bytes_read: Option<Vec<u8>>,
+    bytes_read: usize,
     // bytes_read: usize,
     file: T,
 }
@@ -25,18 +27,17 @@ impl<T> FileWriter<T> {
         ret
     }
 
-    fn reset_bytes_read(&mut self) -> Vec<u8> {
-        let ret = self.bytes_read.take().unwrap_or_else(Vec::new);
-        assert!(self.bytes_read.is_none());
+    fn reset_bytes_read(&mut self) -> u64 {
+        let ret = self.bytes_read as u64;
+        self.bytes_read = 0;
         ret
     }
 }
 
 impl<T: Read> Read for FileWriter<T> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let vec = self.bytes_read.get_or_insert(vec![]);
         let b = self.file.read(buf)?;
-        vec.extend_from_slice(&buf[..b]);
+        self.bytes_read += b;
         // println!("read buf {:?}", &buf);
         Ok(b)
     }
@@ -55,8 +56,8 @@ impl<T: Read + Write> Write for FileWriter<T> {
     }
 }
 
-pub struct LogFile {
-    file: FileWriter<File>,
+pub struct LogFile<F> {
+    file: FileWriter<F>,
     file_idx: u64,
     end_idx: u64,
     options: DefaultOptions,
@@ -70,48 +71,57 @@ pub struct FileOpInfo {
     pub at_end: bool,
 }
 
-impl LogFile {
+pub fn open_log_file<F: RWS, G: Fn(File) -> F>(
+    path_string: &str,
+    clear: bool,
+    open_fn: G,
+) -> Result<LogFile<F>, Error> {
+    let path = Path::new(path_string);
+    info!("Opening log file {}", path.display());
+    let file = open_file(path, clear)?;
+    // let file = Cursor::new(Vec::new());
+    let options = options();
+    let mut l = LogFile {
+        file_idx: 0,
+        end_idx: 0,
+        options,
+        at_end: true,
+        file: FileWriter {
+            bytes_written: 0,
+            bytes_read: 0,
+            file: open_fn(file),
+        },
+    };
+    // find the end of the file
+    l.end_idx = l
+        .file
+        .file
+        .seek(SeekFrom::End(0))
+        .map_err(|_| Error::LogError(LogError::FileSeekError))?;
+    l.seek_to(0)?; // go back to the start
+    Ok(l)
+}
+
+fn open_file(path: &Path, truncate: bool) -> Result<File, Error> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(truncate)
+        .open(path)
+        .map_err(|err| {
+            error!("Error opening file: {}", err);
+            Error::LogError(LogError::FileError)
+        })
+}
+
+impl<F: RWS> LogFile<F> {
     pub fn serialize_option(&self) -> DefaultOptions {
         self.options
     }
 
-    pub fn open(path_string: &str, clear: bool) -> Result<LogFile, Error> {
-        let path = Path::new(path_string);
-        info!("Opening log file {}", path.display());
-        let file = LogFile::open_file(path, clear)?;
-        // let file = Cursor::new(Vec::new());
-        let options = options();
-        let mut l = LogFile {
-            file_idx: 0,
-            end_idx: 0,
-            options,
-            at_end: true,
-            file: FileWriter {
-                bytes_written: 0,
-                bytes_read: None,
-                file,
-            },
-        };
-        l.seek_to_end(); // find the end of the file
-        l.seek_to(0)?; // go back to the start
-        Ok(l)
-    }
-
     pub fn get_end_index(&self) -> u64 {
         self.end_idx
-    }
-
-    fn open_file(path: &Path, truncate: bool) -> Result<File, Error> {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(truncate)
-            .open(path)
-            .map_err(|err| {
-                error!("Error opening file: {}", err);
-                Error::LogError(LogError::FileError)
-            })
     }
 
     // should be called after reading or writing to ensure the indicies are not broked
@@ -179,10 +189,10 @@ impl LogFile {
         })
     }
 
-    fn after_read(&mut self) -> (Vec<u8>, FileOpInfo) {
+    fn after_read(&mut self) -> FileOpInfo {
         let bytes_read = self.file.reset_bytes_read();
         let start_location = self.file_idx;
-        self.file_idx += bytes_read.len() as u64;
+        self.file_idx += bytes_read as u64;
         if self.file_idx == self.end_idx {
             self.at_end = true
         } else {
@@ -190,15 +200,11 @@ impl LogFile {
         }
         self.check_file();
         // println!("after read self {}, end {}", self.file_idx, self.end_idx);
-        let bytes_consumed = bytes_read.len() as u64;
-        (
-            bytes_read,
-            FileOpInfo {
-                at_end: self.at_end,
-                start_location,
-                bytes_consumed,
-            },
-        )
+        FileOpInfo {
+            at_end: self.at_end,
+            start_location,
+            bytes_consumed: bytes_read,
+        }
     }
 
     // returns the number of bytes written
@@ -217,29 +223,31 @@ impl LogFile {
         }
     }
 
-    pub fn seek_to(&mut self, idx: u64) -> Result<u64, Error> {
+    pub fn seek_to(&mut self, idx: u64) -> Result<(), Error> {
         if idx == self.file_idx {
             // already at the index, just return
-            return Ok(self.file_idx);
+            return Ok(());
+        }
+        if idx > self.end_idx {
+            return Err(Error::LogError(LogError::FileSeekPastEndError));
         }
         if idx == self.end_idx {
             self.at_end = true;
         } else {
             self.at_end = false;
         }
-        self.file_idx = idx;
-        self.file.file.seek(SeekFrom::Start(idx)).map_err(|err| {
+        let seek_amount = idx as i64 - self.file_idx as i64;
+        self.file.file.seek_relative(seek_amount).map_err(|err| {
             error!("Error seeking file: {}", err);
             Error::LogError(LogError::FileSeekError)
-        })
+        })?;
+        self.file_idx = idx;
+        Ok(())
     }
 
     pub fn seek_to_end(&mut self) -> u64 {
         self.at_end = true;
-        self.end_idx = self
-            .file
-            .file
-            .seek(SeekFrom::End(0))
+        self.seek_to(self.end_idx)
             .expect("unable to seek to file end");
         self.file_idx = self.end_idx;
         self.file_idx
@@ -258,7 +266,7 @@ impl LogFile {
         Ok(self.after_write())
     }
 
-    pub fn read_log_at<T>(&mut self, idx: u64) -> Result<(Vec<u8>, FileOpInfo, T), Error>
+    pub fn read_log_at<T>(&mut self, idx: u64) -> Result<(FileOpInfo, T), Error>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -266,7 +274,7 @@ impl LogFile {
         self.read_log()
     }
 
-    pub fn read_log<T>(&mut self) -> Result<(Vec<u8>, FileOpInfo, T), Error>
+    pub fn read_log<T>(&mut self) -> Result<(FileOpInfo, T), Error>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -280,18 +288,18 @@ impl LogFile {
                 // println!("read entry error {}", err);
                 Error::LogError(LogError::DeserializeError)
             })?;
-        let (v, info) = self.after_read();
-        Ok((v, info, e))
+        let info = self.after_read();
+        Ok((info, e))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::open_log_file;
     use crate::errors::{Error, LogError};
+    use crate::file_sr::FileSR;
     use bincode::Options;
     use serde::{Deserialize, Serialize};
-
-    use super::LogFile;
 
     #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
     struct SomeSer {
@@ -310,7 +318,7 @@ mod tests {
 
     #[test]
     fn append_log() {
-        let mut l = LogFile::open("log_files/testfile-1.log", true).unwrap();
+        let mut l = open_log_file("log_files/testfile-1.log", true, FileSR::new).unwrap();
         let mut entrys = vec![];
         let count: u64 = 5;
         // let mut prv_idx = 0;
@@ -324,9 +332,8 @@ mod tests {
         }
         l.seek_to(0).unwrap();
         // read the entries
-        for (i, (_, e_bytes, e)) in entrys.iter().enumerate() {
-            let (e2_bytes, e2_info, e2): (_, _, SomeSer) = l.read_log().unwrap();
-            assert_eq!(e_bytes, &e2_bytes);
+        for (i, (_, _e_bytes, e)) in entrys.iter().enumerate() {
+            let (e2_info, e2): (_, SomeSer) = l.read_log().unwrap();
             assert_eq!(e, &e2);
             if i == entrys.len() - 1 {
                 assert!(e2_info.at_end);
@@ -337,7 +344,7 @@ mod tests {
         // see if we can read using the location entry
         for (i, (e_info, _, e)) in entrys.iter().enumerate() {
             // println!("read at {:?}, i {}", e_info, i);
-            let (_, e2_info, e2): (_, _, SomeSer) = l.read_log_at(e_info.start_location).unwrap();
+            let (e2_info, e2): (_, SomeSer) = l.read_log_at(e_info.start_location).unwrap();
             assert_eq!(e, &e2);
             if i == entrys.len() - 1 {
                 assert!(e2_info.at_end);
@@ -355,7 +362,7 @@ mod tests {
 
     #[test]
     fn read_write_u64() {
-        let mut l = LogFile::open("log_files/testfile-2.log", true).unwrap();
+        let mut l = open_log_file("log_files/testfile-2.log", true, FileSR::new).unwrap();
         let count = 10;
         for i in 0..count {
             let op_info = l.write_u64(i).unwrap();

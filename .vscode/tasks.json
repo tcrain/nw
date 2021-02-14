@@ -12,6 +12,15 @@
 		},
 		{
 			"type": "cargo",
+			"command": "build --release",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "build",
+			"label": "Rust: cargo release - nw"
+		},
+		{
+			"type": "cargo",
 			"command": "test",
 			"problemMatcher": [
 				"$rustc"
@@ -19,6 +28,14 @@
 			"group": "test",
 			"label": "Rust: cargo test - nw"
 		},
+		{
+			"type": "cargo",
+			"command": "bench",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "test",
+			"label": "Rust: cargo bench - nw"
+		},
 	],
-	
 }

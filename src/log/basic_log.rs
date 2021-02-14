@@ -6,6 +6,7 @@ use verification::{hash, TimeCheck, TimeInfo};
 
 use crate::{
     errors::{Error, LogError},
+    rw_buf::RWS,
     verification::{self, Id},
 };
 
@@ -40,13 +41,13 @@ impl<'a> Deref for PrevEntryHolder<'a> {
 }
 
 // Iterates the SP entries in log order
-struct SpIterator<'a> {
+struct SpIterator<'a, F> {
     prev_entry: Option<LogEntryStrong>,
     m: &'a mut FxHashMap<u64, StrongPtr>,
-    f: &'a mut LogFile,
+    f: &'a mut LogFile<F>,
 }
 
-impl<'a> Iterator for SpIterator<'a> {
+impl<'a, F: RWS> Iterator for SpIterator<'a, F> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -67,12 +68,12 @@ impl<'a> Iterator for SpIterator<'a> {
     }
 }
 
-struct SpLocalTotalOrderIterator<'a> {
+struct SpLocalTotalOrderIterator<'a, F> {
     id: Id,
-    iter: TotalOrderIterator<'a>,
+    iter: TotalOrderIterator<'a, F>,
 }
 
-impl<'a> Iterator for SpLocalTotalOrderIterator<'a> {
+impl<'a, F: RWS> Iterator for SpLocalTotalOrderIterator<'a, F> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -95,10 +96,10 @@ enum LogItems {
 
 impl LogItems {
     // drops the first item in the log and returns the item dropped
-    fn drop_first(
+    fn drop_first<F: RWS>(
         &mut self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Result<StrongPtrIdx, Error> {
         let entry = match self {
             LogItems::Empty => return Result::Err(Error::LogError(LogError::EmptyLogError)),
@@ -134,11 +135,11 @@ impl LogItems {
         Ok(entry)
     }
 
-    fn log_iterator<'a>(
+    fn log_iterator<'a, F>(
         &self,
         m: &'a mut FxHashMap<u64, StrongPtr>,
-        f: &'a mut LogFile,
-    ) -> LogIterator<'a> {
+        f: &'a mut LogFile<F>,
+    ) -> LogIterator<'a, F> {
         LogIterator {
             prv_entry: match self {
                 LogItems::Empty => None,
@@ -230,7 +231,7 @@ struct LogMultiple {
     first_entry: StrongPtrIdx,
 }
 
-pub struct Log {
+pub struct Log<F: RWS> {
     index: u64,
     first_last: LogItems,
     last_op_total_order: Option<LogEntryWeak>,
@@ -241,12 +242,19 @@ pub struct Log {
     init_sp: Option<LogEntryWeak>,
     // set_initial_sp_op: bool,
     init_sp_entry_info: EntryInfo,
-    pub f: LogFile,
+    pub f: LogFile<F>,
     pub m: FxHashMap<u64, StrongPtr>, // log entries in memory by their log file index
 }
 
-impl Log {
-    pub fn new(log_file: LogFile) -> Log {
+impl<F: RWS> Drop for Log<F> {
+    fn drop(&mut self) {
+        // we drop from the start so we dont overflow the stack
+        while self.drop_first().is_ok() {}
+    }
+}
+
+impl<F: RWS> Log<F> {
+    pub fn new(log_file: LogFile<F>) -> Log<F> {
         let mut l = Log {
             index: 0,
             first_last: LogItems::Empty,
@@ -359,14 +367,14 @@ impl Log {
         }*/
     }
 
-    fn sp_local_total_order_iterator(&mut self, id: Id) -> SpLocalTotalOrderIterator {
+    fn sp_local_total_order_iterator(&mut self, id: Id) -> SpLocalTotalOrderIterator<F> {
         SpLocalTotalOrderIterator {
             id,
             iter: self.sp_total_order_iterator(),
         }
     }
 
-    fn sp_total_order_iterator(&mut self) -> TotalOrderIterator {
+    fn sp_total_order_iterator(&mut self) -> TotalOrderIterator<F> {
         TotalOrderIterator {
             prev_entry: match &self.last_sp_total_order {
                 None => None,
@@ -379,7 +387,7 @@ impl Log {
     }
 
     // creates an iterator that traverses the SP in log order
-    fn sp_iterator_from_last(&mut self) -> SpIterator {
+    fn sp_iterator_from_last(&mut self) -> SpIterator<F> {
         SpIterator {
             prev_entry: match &self.last_sp {
                 None => None,
@@ -390,7 +398,7 @@ impl Log {
         }
     }
 
-    pub fn op_total_order_iterator_from_last(&mut self) -> TotalOrderIterator {
+    pub fn op_total_order_iterator_from_last(&mut self) -> TotalOrderIterator<F> {
         TotalOrderIterator {
             prev_entry: match &self.last_op_total_order {
                 None => None,
@@ -402,7 +410,7 @@ impl Log {
         }
     }
 
-    pub fn op_total_order_iterator_from_first(&mut self) -> TotalOrderIterator {
+    pub fn op_total_order_iterator_from_first(&mut self) -> TotalOrderIterator<F> {
         TotalOrderIterator {
             prev_entry: match &self.first_op_to {
                 None => None,
@@ -414,7 +422,7 @@ impl Log {
         }
     }
 
-    fn log_iterator_from_end(&mut self) -> LogIterator {
+    fn log_iterator_from_end(&mut self) -> LogIterator<F> {
         self.first_last.log_iterator(&mut self.m, &mut self.f)
     }
 
@@ -640,19 +648,31 @@ impl Log {
 #[cfg(test)]
 mod tests {
     use bincode::Options;
-    use std::collections::HashMap;
+    use std::{collections::HashMap, fs::File};
 
-    use crate::{log::op::tests::make_op_late, verification::TimeTest};
+    use crate::{
+        file_sr::FileSR, log::op::tests::make_op_late, rw_buf::RWBuf, verification::TimeTest,
+    };
 
     use crate::log::{
         entry::{total_order_after_iterator, total_order_iterator},
+        log_file::open_log_file,
         op::{get_empty_data, EntryInfo, EntryInfoData},
     };
 
     use super::*;
 
-    fn get_log_file(idx: usize) -> LogFile {
-        LogFile::open(&format!("log_files/basic_log{}.log", idx), true).unwrap()
+    fn get_log_file_direct(idx: usize) -> LogFile<FileSR> {
+        open_log_file(
+            &format!("log_files/basic_log{}.log", idx),
+            true,
+            FileSR::new,
+        )
+        .unwrap()
+    }
+
+    fn get_log_file(idx: usize) -> LogFile<RWBuf<File>> {
+        open_log_file(&format!("log_files/basic_log{}.log", idx), true, RWBuf::new).unwrap()
     }
 
     fn check_iter_total_order<T: Iterator<Item = StrongPtrIdx>>(i: T) {
@@ -682,7 +702,7 @@ mod tests {
         }
     }
 
-    fn check_log_indicies(l: &mut Log) {
+    fn check_log_indicies<F: RWS>(l: &mut Log<F>) {
         check_iter_total_order(l.op_total_order_iterator_from_last()); // check we have the right pointers for the ops in the log
         check_iter_total_order(l.sp_total_order_iterator()); // check we have the right pointers for the sps in log
                                                              // check the log entry pointers
@@ -1301,10 +1321,10 @@ mod tests {
         check_log_indicies(&mut l);
     }
 
-    fn insert_ops(
+    fn insert_ops<F: RWS>(
         num_ops: usize,
         num_ids: Id,
-        l: &mut Log,
+        l: &mut Log<F>,
         ti: &mut TimeTest,
     ) -> Vec<StrongPtrIdx> {
         let mut ret = vec![];
@@ -1317,7 +1337,7 @@ mod tests {
         ret
     }
 
-    fn get_entry_info(id: Id, l: &Log, last_sps: &HashMap<Id, EntryInfo>) -> EntryInfo {
+    fn get_entry_info<F: RWS>(id: Id, l: &Log<F>, last_sps: &HashMap<Id, EntryInfo>) -> EntryInfo {
         match last_sps.get(&id) {
             Some(ei) => *ei,
             None => l.get_initial_entry_info(),

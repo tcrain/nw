@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     errors::{Error, LogError},
+    rw_buf::RWS,
     utils::result_to_val,
     verification,
 };
@@ -58,21 +59,25 @@ impl Drop for LogEntry {
 }
 
 impl LogEntry {
-    fn finish_deserialize(&mut self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile) {
+    fn finish_deserialize<F: RWS>(
+        &mut self,
+        m: &mut FxHashMap<u64, StrongPtr>,
+        f: &mut LogFile<F>,
+    ) {
         match &mut self.entry {
             PrevEntry::Sp(sp) => sp.finish_deserialize(m, f),
             PrevEntry::Op(_) => (),
         }
     }
 
-    fn from_file(
+    fn from_file<F: RWS>(
         idx: u64,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Result<LogEntry, Error> {
         f.seek_to(idx)?;
         // first read the serialized bytes
-        let (_, entry_info, mut entry): (_, _, LogEntry) = f.read_log()?;
+        let (entry_info, mut entry): (_, LogEntry) = f.read_log()?;
         // sanity check
         if entry_info.start_location != entry.file_index {
             panic!("entry has an invlid file index")
@@ -128,10 +133,10 @@ impl LogEntry {
     }
 
     // write pointers when the entry is first received, the next pointer in the total order should be unknown
-    pub fn write_pointers_initial(
+    pub fn write_pointers_initial<F: RWS>(
         &mut self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Result<(), Error> {
         // the entry is always added at the end of the log
         f.seek_to_end();
@@ -328,18 +333,18 @@ impl TotalOrderPointers {
         TotalOrderPointers { next_to, prev_to }
     }
 
-    pub fn get_prev_to(
+    pub fn get_prev_to<F: RWS>(
         &self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.prev_to.as_ref().map(|entry| entry.get_ptr(m, f))
     }
 
-    pub fn get_next_to(
+    pub fn get_next_to<F: RWS>(
         &self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.next_to.as_ref().map(|entry| entry.get_ptr(m, f))
     }
@@ -353,11 +358,11 @@ impl TotalOrderPointers {
     }
 }
 
-pub fn set_next_total_order(
+pub fn set_next_total_order<F: RWS>(
     prev: &StrongPtrIdx,
     new_next: &StrongPtrIdx,
     m: &mut FxHashMap<u64, StrongPtr>,
-    f: &mut LogFile,
+    f: &mut LogFile<F>,
 ) {
     match prev.ptr.borrow().to_pointers.next_to.as_ref() {
         None => (),
@@ -461,7 +466,7 @@ impl LogEntryKeep {
         self.ptr.as_ref().expect("should not be none")
     }
 
-    fn load_pointer(&mut self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile) {
+    fn load_pointer<F: RWS>(&mut self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile<F>) {
         self.ptr = Some(get_ptr(self.file_idx, m, f))
     }
 
@@ -519,7 +524,11 @@ impl PartialEq for LogEntryStrong {
     }
 }
 
-pub fn get_ptr(file_idx: u64, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile) -> StrongPtr {
+pub fn get_ptr<F: RWS>(
+    file_idx: u64,
+    m: &mut FxHashMap<u64, StrongPtr>,
+    f: &mut LogFile<F>,
+) -> StrongPtr {
     // check the map
     match m.get(&file_idx) {
         Some(entry) => Rc::clone(entry),
@@ -557,10 +566,10 @@ impl LogEntryStrong {
         Err(Error::LogError(LogError::OpAlreadyDropped))
     }
 
-    pub fn log_entry_keep(
+    pub fn log_entry_keep<F: RWS>(
         &mut self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> LogEntryKeep {
         LogEntryKeep {
             file_idx: self.file_idx,
@@ -568,10 +577,10 @@ impl LogEntryStrong {
         }
     }
 
-    pub fn strong_ptr_idx(
+    pub fn strong_ptr_idx<F: RWS>(
         &mut self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
@@ -579,7 +588,11 @@ impl LogEntryStrong {
         }
     }
 
-    pub fn get_ptr(&mut self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile) -> StrongPtr {
+    pub fn get_ptr<F: RWS>(
+        &mut self,
+        m: &mut FxHashMap<u64, StrongPtr>,
+        f: &mut LogFile<F>,
+    ) -> StrongPtr {
         if self.ptr.is_none() {
             self.ptr = Some(get_ptr(self.file_idx, m, f));
         }
@@ -679,10 +692,10 @@ impl LogEntryWeak {
         }
     }
 
-    fn as_log_entry_strong(
+    fn as_log_entry_strong<F: RWS>(
         &self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> LogEntryStrong {
         LogEntryStrong {
             file_idx: self.file_idx,
@@ -690,10 +703,10 @@ impl LogEntryWeak {
         }
     }
 
-    pub fn to_strong_ptr_idx(
+    pub fn to_strong_ptr_idx<F: RWS>(
         &self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
@@ -701,7 +714,11 @@ impl LogEntryWeak {
         }
     }
 
-    pub fn get_ptr(&self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile) -> StrongPtr {
+    pub fn get_ptr<F: RWS>(
+        &self,
+        m: &mut FxHashMap<u64, StrongPtr>,
+        f: &mut LogFile<F>,
+    ) -> StrongPtr {
         self.ptr
             .upgrade()
             .unwrap_or_else(|| get_ptr(self.file_idx, m, f))
@@ -810,10 +827,10 @@ impl LogPointers {
         }
     }
 
-    pub fn get_prev(
+    pub fn get_prev<F: RWS>(
         &mut self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.prev_entry.as_mut().map(|entry| entry.get_ptr(m, f))
     }
@@ -822,10 +839,10 @@ impl LogPointers {
         self.prev_entry.as_ref().map(|entry| entry.clone_strong())
     }
 
-    pub fn get_next(
+    pub fn get_next<F: RWS>(
         &self,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.next_entry.as_ref().map(|entry| entry.get_ptr(m, f))
     }
@@ -954,17 +971,21 @@ pub fn set_next_sp(
 }
 
 impl OuterSp {
-    pub fn finish_deserialize(&mut self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile) {
+    pub fn finish_deserialize<F: RWS>(
+        &mut self,
+        m: &mut FxHashMap<u64, StrongPtr>,
+        f: &mut LogFile<F>,
+    ) {
         for nxt in self.not_included_ops.iter_mut() {
             nxt.load_pointer(m, f);
         }
     }
 
     // returns all operations that have not been included in this SP in the log
-    pub fn get_ops_after_iter<'a>(
+    pub fn get_ops_after_iter<'a, F: RWS>(
         &'a self,
         m: &'a mut FxHashMap<u64, StrongPtr>,
-        f: &'a mut LogFile,
+        f: &'a mut LogFile<F>,
     ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>, Error> {
         let (not_included_iter, log_iter) = self.get_iters(m, f)?;
         let iter = not_included_iter.merge_by(log_iter, |x, y| {
@@ -973,12 +994,12 @@ impl OuterSp {
         Ok(Box::new(iter))
     }
 
-    pub fn check_sp_exact(
+    pub fn check_sp_exact<F: RWS>(
         &self,
         new_sp: Sp,
         exact: &[EntryInfo],
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Result<OuterSp, Error> {
         // create a total order iterator over the operations including the unused items from the previous
         // SP that takes the exact set from exact, and returns the rest as unused, until last_op
@@ -999,13 +1020,13 @@ impl OuterSp {
         })
     }
 
-    pub fn check_sp_log_order(
+    pub fn check_sp_log_order<F: RWS>(
         &self,
         new_sp: Sp,
         included: &[EntryInfo],
         not_included: &[EntryInfo],
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
     ) -> Result<OuterSp, Error> {
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
         // it uses included and not included to decide what operations to include
@@ -1029,14 +1050,14 @@ impl OuterSp {
         })
     }
 
-    fn get_iters<'a>(
+    fn get_iters<'a, F: RWS>(
         &'a self,
         m: &'a mut FxHashMap<u64, StrongPtr>,
-        f: &'a mut LogFile,
+        f: &'a mut LogFile<F>,
     ) -> Result<
         (
             impl Iterator<Item = StrongPtrIdx> + 'a,
-            TotalOrderAfterIterator,
+            TotalOrderAfterIterator<F>,
         ),
         Error,
     > {
@@ -1132,12 +1153,12 @@ impl Debug for OuterSp {
     }
 }
 
-pub fn total_order_iterator<'a>(
+pub fn total_order_iterator<'a, F>(
     start: Option<&LogEntryStrong>,
     forward: bool,
     m: &'a mut FxHashMap<u64, StrongPtr>,
-    f: &'a mut LogFile,
-) -> TotalOrderIterator<'a> {
+    f: &'a mut LogFile<F>,
+) -> TotalOrderIterator<'a, F> {
     TotalOrderIterator {
         prev_entry: start.map(|op| op.clone_strong()),
         forward,
@@ -1146,14 +1167,14 @@ pub fn total_order_iterator<'a>(
     }
 }
 
-pub struct TotalOrderIterator<'a> {
+pub struct TotalOrderIterator<'a, F> {
     pub prev_entry: Option<LogEntryStrong>,
     pub forward: bool,
     pub m: &'a mut FxHashMap<u64, StrongPtr>,
-    pub f: &'a mut LogFile,
+    pub f: &'a mut LogFile<F>,
 }
 
-impl<'a> Iterator for TotalOrderIterator<'a> {
+impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1182,12 +1203,12 @@ impl<'a> Iterator for TotalOrderIterator<'a> {
 }
 
 // total order iterator that only includes log entries with a larger (or equal) log index than the input
-pub struct TotalOrderAfterIterator<'a> {
-    iter: TotalOrderIterator<'a>,
+pub struct TotalOrderAfterIterator<'a, F> {
+    iter: TotalOrderIterator<'a, F>,
     min_index: u64,
 }
 
-impl<'a> Iterator for TotalOrderAfterIterator<'a> {
+impl<'a, F: RWS> Iterator for TotalOrderAfterIterator<'a, F> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1200,11 +1221,11 @@ impl<'a> Iterator for TotalOrderAfterIterator<'a> {
     }
 }
 
-pub fn total_order_after_all_iterator<'a>(
+pub fn total_order_after_all_iterator<'a, F>(
     start: Option<&StrongPtrIdx>,
     m: &'a mut FxHashMap<u64, StrongPtr>,
-    f: &'a mut LogFile,
-) -> TotalOrderAfterIterator<'a> {
+    f: &'a mut LogFile<F>,
+) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
         iter: total_order_iterator(
             start.map(|entry| entry.to_log_entry_strong()).as_ref(),
@@ -1216,11 +1237,11 @@ pub fn total_order_after_all_iterator<'a>(
     }
 }
 
-pub fn total_order_after_iterator<'a>(
+pub fn total_order_after_iterator<'a, F>(
     start: Option<&StrongPtrIdx>,
     m: &'a mut FxHashMap<u64, StrongPtr>,
-    f: &'a mut LogFile,
-) -> TotalOrderAfterIterator<'a> {
+    f: &'a mut LogFile<F>,
+) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
         iter: total_order_iterator(
             start.map(|entry| entry.to_log_entry_strong()).as_ref(),
@@ -1250,9 +1271,9 @@ where
     exact_check: IncludedCheck<J>,
 }
 
-pub fn total_order_exact_iterator<'a, J, K, I>(
+pub fn total_order_exact_iterator<'a, J, K, I, F: RWS>(
     prev_not_included: I,
-    log_iter: TotalOrderAfterIterator<'a>,
+    log_iter: TotalOrderAfterIterator<'a, F>,
     exact: J,
     extra_info: K,
 ) -> TotalOrderExactIterator<'a, J, K>
@@ -1384,9 +1405,9 @@ where
 //  x.get_ptr().borrow().entry.get_entry_info() <= y.get_ptr().borrow().entry.get_entry_info()
 //}
 
-pub fn total_order_check_iterator<'a, J, K, I>(
+pub fn total_order_check_iterator<'a, J, K, I, F: RWS>(
     prev_not_included: I,
-    log_iter: TotalOrderAfterIterator<'a>,
+    log_iter: TotalOrderAfterIterator<'a, F>,
     included: J,
     not_included: J,
     extra_info: K,
@@ -1451,13 +1472,13 @@ where
     }
 }
 
-pub struct LogIterator<'a> {
+pub struct LogIterator<'a, F> {
     pub prv_entry: Option<StrongPtrIdx>,
     pub m: &'a mut FxHashMap<u64, StrongPtr>,
-    pub f: &'a mut LogFile,
+    pub f: &'a mut LogFile<F>,
 }
 
-impl<'a> Iterator for LogIterator<'a> {
+impl<'a, F: RWS> Iterator for LogIterator<'a, F> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1481,11 +1502,14 @@ mod tests {
     use rustc_hash::FxHashMap;
 
     use crate::{
+        file_sr::FileSR,
         log::{
+            log_file::open_log_file,
             log_file::LogFile,
             op::{BasicInfo, EntryInfo, OpState},
             sp::SpState,
         },
+        rw_buf::RWS,
         verification::{hash, Id, TimeInfo, TimeTest},
     };
 
@@ -1546,7 +1570,12 @@ mod tests {
         log_entry
     }
 
-    fn make_outer_op(id: Id, log_index: u64, ti: &mut TimeTest, f: &LogFile) -> PrevEntry {
+    fn make_outer_op<F: RWS>(
+        id: Id,
+        log_index: u64,
+        ti: &mut TimeTest,
+        f: &LogFile<F>,
+    ) -> PrevEntry {
         let op = OpState::new(id, ti, f.serialize_option()).unwrap();
         let outer_op = OuterOp {
             log_index,
@@ -1559,11 +1588,11 @@ mod tests {
         entry
     }
 
-    fn make_outer_sp(
+    fn make_outer_sp<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
         prev_sp: Option<&LogEntryKeep>,
         last_op: Option<&LogEntryKeep>,
         not_included_ops: Vec<LogEntryKeep>,
@@ -1629,11 +1658,11 @@ mod tests {
         }
     }
 
-    fn make_op(
+    fn make_op<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
         m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile,
+        f: &mut LogFile<F>,
         log_entry: StrongPtr,
         prev_to: Option<StrongPtr>,
     ) -> LogEntryKeep {
@@ -1666,7 +1695,7 @@ mod tests {
 
     #[test]
     fn serialize_entry() {
-        let mut f = LogFile::open("log_files/entry_log0.log", true).unwrap();
+        let mut f = open_log_file("log_files/entry_log0.log", true, FileSR::new).unwrap();
         let mut ti = TimeTest::new();
         let id = 0;
         let mut m = FxHashMap::default();
