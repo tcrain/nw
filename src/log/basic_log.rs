@@ -1,4 +1,4 @@
-use rustc_hash::FxHashMap;
+use log::debug;
 use std::cell::{Ref, RefCell};
 use std::ops::Deref;
 use std::{cmp::Ordering, rc::Rc};
@@ -10,17 +10,17 @@ use crate::{
     verification::{self, Id},
 };
 
-use super::sp::Sp;
 use super::{
     entry::{
         drop_entry, set_next_sp, set_next_total_order, LogEntry, LogEntryStrong, LogEntryWeak,
-        LogIterator, LogPointers, OuterOp, OuterSp, PrevEntry, StrongPtr, StrongPtrIdx,
-        TotalOrderIterator, TotalOrderPointers,
+        LogIterator, LogPointers, OuterOp, OuterSp, PrevEntry, StrongPtrIdx, TotalOrderIterator,
+        TotalOrderPointers,
     },
     log_file::LogFile,
     op::{BasicInfo, EntryInfo, Op, OpState},
     sp::SpState,
 };
+use super::{hash_items::HashItems, sp::Sp};
 
 // TODO: check equal when inserting, then don't insert
 
@@ -43,7 +43,7 @@ impl<'a> Deref for PrevEntryHolder<'a> {
 // Iterates the SP entries in log order
 struct SpIterator<'a, F> {
     prev_entry: Option<LogEntryStrong>,
-    m: &'a mut FxHashMap<u64, StrongPtr>,
+    m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 }
 
@@ -98,7 +98,7 @@ impl LogItems {
     // drops the first item in the log and returns the item dropped
     fn drop_first<F: RWS>(
         &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<StrongPtrIdx, Error> {
         let entry = match self {
@@ -107,6 +107,7 @@ impl LogItems {
             LogItems::Multiple(mi) => {
                 let mut nxt = mi.first_entry.ptr.borrow().get_next();
                 // let ret = mi.first_entry.clone();
+                debug!("drop log index {}", mi.first_entry.ptr.borrow().log_index);
                 let prev = mi.first_entry.clone();
                 // let to_drop = mi.first_entry.clone_strong();
                 if let Some(mut entry) = nxt.take() {
@@ -129,15 +130,15 @@ impl LogItems {
                 // prev
             }
         };
-        if m.remove(&entry.ptr.borrow().file_index).is_none() {
-            panic!("expected entry to be in map when unlinking")
-        }
+        // if m.remove(&entry.ptr.borrow().file_index).is_none() {
+        //    panic!("expected entry to be in map when unlinking")
+        // }
         Ok(entry)
     }
 
     fn log_iterator<'a, F>(
         &self,
-        m: &'a mut FxHashMap<u64, StrongPtr>,
+        m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
     ) -> LogIterator<'a, F> {
         LogIterator {
@@ -151,19 +152,19 @@ impl LogItems {
         }
     }
 
-    fn add_item(
+    fn add_item<F: RWS>(
         &mut self,
         idx: u64,
         file_idx: u64,
         entry: PrevEntry,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
+        f: &mut LogFile<F>,
     ) -> StrongPtrIdx {
         let prv = match self {
             LogItems::Empty => None,
             LogItems::Single(si) => Some(si.entry.to_log_entry_strong()), // Rc::clone(&si.entry)),
             LogItems::Multiple(mi) => Some(mi.last_entry.to_log_entry_strong()), //::clone(&mi.last_entry))
         };
-        // println!("my log file indx {}", file_idx);
         let log_entry = LogEntry {
             log_index: idx,
             file_index: file_idx,
@@ -179,12 +180,9 @@ impl LogItems {
             ser_size: None, // this will be updated once serialized
         };
         let new_entry = Rc::new(RefCell::new(log_entry));
-        if m.insert(file_idx, Rc::clone(&new_entry)).is_some() {
-            panic!("found an entry in the file when inserting")
-        }
 
         let new_entry_keep = StrongPtrIdx::new(file_idx, Rc::clone(&new_entry));
-        let new_entry_strong = LogEntryStrong::new(new_entry, file_idx);
+        let new_entry_strong = LogEntryStrong::new(Rc::clone(&new_entry), file_idx);
         match self {
             LogItems::Empty => {
                 *self = LogItems::Single(LogSingle {
@@ -207,9 +205,17 @@ impl LogItems {
                     .ptr
                     .borrow_mut()
                     .set_next(Some(new_entry_strong.clone_weak()));
-                lm.last_entry = new_entry_keep.clone()
+                lm.last_entry = new_entry_keep.clone();
             }
-        };
+        }
+        if let (_, Some(replaced)) = m.store_recent(file_idx, new_entry) {
+            // the oldest entry was removed from the map, so unlink it form the list so it can be GC'd
+            let itm = self
+                .drop_first(m, f)
+                .expect("expected to removed from multiple");
+            debug_assert_eq!(replaced, itm.file_idx);
+        }
+
         new_entry_keep
     }
 
@@ -242,8 +248,9 @@ pub struct Log<F: RWS> {
     init_sp: Option<LogEntryWeak>,
     // set_initial_sp_op: bool,
     init_sp_entry_info: EntryInfo,
+    // max_entries: u64, // maximum number of entries to keep in the log
     pub f: LogFile<F>,
-    pub m: FxHashMap<u64, StrongPtr>, // log entries in memory by their log file index
+    pub m: HashItems<LogEntry>, // log entries in memory by their log file index
 }
 
 impl<F: RWS> Drop for Log<F> {
@@ -267,7 +274,7 @@ impl<F: RWS> Log<F> {
             // set_initial_sp_op: false,
             init_sp_entry_info: EntryInfo::default(),
             f: log_file,
-            m: FxHashMap::default(),
+            m: HashItems::default(),
         };
         // insert the initial sp
         let init_sp = OuterSp {
@@ -277,7 +284,6 @@ impl<F: RWS> Log<F> {
             not_included_ops: vec![],
             prev_sp: None,
         };
-        // println!("init hash {:?}", init_sp.sp.hash);
         l.init_sp_entry_info = init_sp.sp.get_entry_info();
         let outer_sp = l
             .insert_outer_sp(init_sp)
@@ -473,7 +479,7 @@ impl<F: RWS> Log<F> {
         }
         // add the sp to the log
         self.first_last
-            .add_item(self.index, file_index, entry, &mut self.m)
+            .add_item(self.index, file_index, entry, &mut self.m, &mut self.f)
     }
 
     pub fn insert_outer_sp(&mut self, sp: OuterSp) -> Result<StrongPtrIdx, Error> {
@@ -648,10 +654,15 @@ impl<F: RWS> Log<F> {
 #[cfg(test)]
 mod tests {
     use bincode::Options;
-    use std::{collections::HashMap, fs::File};
+    use std::{
+        cmp,
+        collections::{HashMap, VecDeque},
+        fs::File,
+    };
 
     use crate::{
-        file_sr::FileSR, log::op::tests::make_op_late, rw_buf::RWBuf, verification::TimeTest,
+        file_sr::FileSR, log::hash_items::DEFAULT_MAX_ENTRIES, log::op::tests::make_op_late,
+        rw_buf::RWBuf, verification::TimeTest,
     };
 
     use crate::log::{
@@ -766,9 +777,10 @@ mod tests {
             check_log_indicies(&mut l);
             entry_infos.push(op.ptr.borrow().entry.get_entry_info());
         }
+        // clear the memory map so we dont have extra references
+        l.m.clear();
         // drop initial sp and each op
         for _ in 0..op_count {
-            // println!("call drop first {}", i);
             let entry = {
                 let entry = l.drop_first().unwrap();
                 Rc::downgrade(&entry.ptr)
@@ -787,7 +799,6 @@ mod tests {
             .enumerate()
         {
             let idx = op_count + 1 - i as u64;
-            // println!("loaded idx {}", idx);
             assert_eq!(idx, entry.ptr.borrow().log_index);
             assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info())
         }
@@ -931,11 +942,12 @@ mod tests {
             prev_sp_info = new_sp.ptr.borrow().entry.as_sp().sp.get_entry_info();
             entry_infos.push(new_sp.ptr.borrow().entry.get_entry_info());
         }
+        // clear the memory map so we dont have extra references
+        l.m.clear();
         // first drop the initial sp then the remaining sps
         for _ in 0..num_sp {
             let entry = {
                 let entry = l.drop_first().unwrap();
-                // println!("drop {}, {}", entry, i);
                 Rc::downgrade(&entry.ptr)
             };
             assert!(entry.upgrade().is_none()) // ensure the entry has been dropped
@@ -953,16 +965,12 @@ mod tests {
             .enumerate()
         {
             let idx = num_sp + 1 - i as u64;
-            // println!("loaded idx {}", idx);
             assert_eq!(idx, entry.ptr.borrow().log_index);
             assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info())
         }
         // check we can still add sps
         l.insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti, l.f.serialize_option()))
             .unwrap();
-        //for nxt in l.sp_iterator_from_last() {
-        //    println!("nxt in iter {}", nxt.ptr.borrow().log_index);
-        //}
         // be sure we have num_sp + 2 sps (+2 because of the inital log entry plus the additional one added)
         assert_eq!(num_sp + 2, l.sp_iterator_from_last().count() as u64);
         assert_eq!(num_sp + 2, l.sp_total_order_iterator().count() as u64);
@@ -1155,8 +1163,6 @@ mod tests {
         check_log_indicies(&mut l);
         l.insert_op(op3, &ti).unwrap();
 
-        // println!("op1 {}, op2 {}, op3 {}, sp1 {}", op1.op.info.time, op2.op.info.time, op3.info.time, sp1.info.time);
-
         // when input op2 will be used, so it will create a hash error
         assert_eq!(
             Error::LogError(LogError::SpHashNotComputed),
@@ -1341,6 +1347,80 @@ mod tests {
         match last_sps.get(&id) {
             Some(ei) => *ei,
             None => l.get_initial_entry_info(),
+        }
+    }
+
+    #[test]
+    fn drop_op_max() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new(get_log_file(12));
+        let mut entry_infos = vec![l.get_initial_entry_info()];
+        let mut entries = VecDeque::new();
+        let op_count = DEFAULT_MAX_ENTRIES + 10;
+        for i in 0..op_count {
+            let op = l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+            // we should have no more than the max entires in memory
+            assert_eq!(
+                cmp::min(i + 2, DEFAULT_MAX_ENTRIES),
+                l.m.recent_entries_count() as usize
+            );
+            entry_infos.push(op.ptr.borrow().entry.get_entry_info());
+            entries.push_back(op);
+            if entries.len() > DEFAULT_MAX_ENTRIES {
+                // be sure we have dropped the earlier entry
+                let first = Rc::downgrade(&entries.pop_front().unwrap().ptr);
+                assert!(first.upgrade().is_none());
+            }
+        }
+        // be sure we can load the items from disk
+        for (i, (entry, entry_info)) in l
+            .log_iterator_from_end()
+            .zip(entry_infos.iter().rev())
+            .enumerate()
+        {
+            let idx = (op_count + 1 - i) as u64;
+            assert_eq!(idx, entry.ptr.borrow().log_index);
+            assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info())
+        }
+        // check we can still add ops
+        l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+        assert_eq!(
+            (op_count + 1) as u64,
+            l.op_total_order_iterator_from_last().count() as u64
+        );
+    }
+
+    #[test]
+    fn load_drop_disk() {
+        let mut ti = TimeTest::new();
+        let mut l = Log::new(get_log_file(13));
+        let mut entry_infos = vec![l.get_initial_entry_info()];
+        let op_count = DEFAULT_MAX_ENTRIES * 4;
+        for _ in 0..op_count {
+            let op = l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+            entry_infos.push(op.ptr.borrow().entry.get_entry_info());
+        }
+        // clear the map
+        // l.m.clear();
+        let mut items = VecDeque::new();
+        // be sure we can load the items from disk
+        for (i, (entry, entry_info)) in l
+            .log_iterator_from_end()
+            .zip(entry_infos.iter().rev())
+            .enumerate()
+        {
+            let idx = (op_count + 1 - i) as u64;
+            assert_eq!(idx, entry.ptr.borrow().log_index);
+            assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info());
+            if i >= DEFAULT_MAX_ENTRIES {
+                // after default max entires, we will start loading items from disk
+                items.push_back(entry);
+                if items.len() > DEFAULT_MAX_ENTRIES {
+                    // be sure we old entries have been cleared from disk
+                    let entry = Rc::downgrade(&items.pop_front().unwrap().ptr);
+                    assert!(entry.upgrade().is_none());
+                }
+            }
         }
     }
 

@@ -13,10 +13,11 @@ use crate::{
 };
 use bincode::Options;
 use itertools::Itertools;
-use rustc_hash::FxHashMap;
+use log::debug;
 use verification::Hash;
 
 use super::{
+    hash_items::HashItems,
     log_file::LogFile,
     op::{EntryInfo, EntryInfoData, OpState},
     sp::{Sp, SpState},
@@ -59,11 +60,7 @@ impl Drop for LogEntry {
 }
 
 impl LogEntry {
-    fn finish_deserialize<F: RWS>(
-        &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile<F>,
-    ) {
+    fn finish_deserialize<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
         match &mut self.entry {
             PrevEntry::Sp(sp) => sp.finish_deserialize(m, f),
             PrevEntry::Op(_) => (),
@@ -72,7 +69,7 @@ impl LogEntry {
 
     fn from_file<F: RWS>(
         idx: u64,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<LogEntry, Error> {
         f.seek_to(idx)?;
@@ -112,6 +109,7 @@ impl LogEntry {
         entry.log_pointers = log_pointers;
         entry.finish_deserialize(m, f);
         entry.check_valid();
+        debug!("loaded from disk {}", entry.log_index);
         Ok(entry)
     }
 
@@ -135,7 +133,7 @@ impl LogEntry {
     // write pointers when the entry is first received, the next pointer in the total order should be unknown
     pub fn write_pointers_initial<F: RWS>(
         &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<(), Error> {
         // the entry is always added at the end of the log
@@ -180,7 +178,6 @@ impl LogEntry {
         // write my serialized bytes
         let info = f.append_log(self)?;
         self.ser_size = Some(info.bytes_consumed); // keep the size of this entry in bytes
-                                                   // println!("wrote {:?} bytes as serialized entry", self.ser_size);
                                                    // write the location of the previous log entry
         let prv_location = match self.log_pointers.get_prev(m, f) {
             Some(prv) => prv.borrow().file_index,
@@ -335,7 +332,7 @@ impl TotalOrderPointers {
 
     pub fn get_prev_to<F: RWS>(
         &self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.prev_to.as_ref().map(|entry| entry.get_ptr(m, f))
@@ -343,7 +340,7 @@ impl TotalOrderPointers {
 
     pub fn get_next_to<F: RWS>(
         &self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.next_to.as_ref().map(|entry| entry.get_ptr(m, f))
@@ -361,7 +358,7 @@ impl TotalOrderPointers {
 pub fn set_next_total_order<F: RWS>(
     prev: &StrongPtrIdx,
     new_next: &StrongPtrIdx,
-    m: &mut FxHashMap<u64, StrongPtr>,
+    m: &mut HashItems<LogEntry>,
     f: &mut LogFile<F>,
 ) {
     match prev.ptr.borrow().to_pointers.next_to.as_ref() {
@@ -466,7 +463,7 @@ impl LogEntryKeep {
         self.ptr.as_ref().expect("should not be none")
     }
 
-    fn load_pointer<F: RWS>(&mut self, m: &mut FxHashMap<u64, StrongPtr>, f: &mut LogFile<F>) {
+    fn load_pointer<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
         self.ptr = Some(get_ptr(self.file_idx, m, f))
     }
 
@@ -526,20 +523,20 @@ impl PartialEq for LogEntryStrong {
 
 pub fn get_ptr<F: RWS>(
     file_idx: u64,
-    m: &mut FxHashMap<u64, StrongPtr>,
+    m: &mut HashItems<LogEntry>,
     f: &mut LogFile<F>,
 ) -> StrongPtr {
     // check the map
-    match m.get(&file_idx) {
+    match m.get(file_idx) {
         Some(entry) => Rc::clone(entry),
         None => {
             // the entry must be loaded from the file
-            // println!("load from disk at idx {}", file_idx);
+            debug!("load from disk at idx {}", file_idx);
             let entry = Rc::new(RefCell::new(
                 LogEntry::from_file(file_idx, m, f).expect("unable to load entry from file"),
             ));
             let ptr = Rc::clone(&entry);
-            if m.insert(file_idx, entry).is_some() {
+            if m.store_from_disk(file_idx, entry).is_some() {
                 panic!("found unexpected entry at file index");
             }
             ptr
@@ -568,7 +565,7 @@ impl LogEntryStrong {
 
     pub fn log_entry_keep<F: RWS>(
         &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> LogEntryKeep {
         LogEntryKeep {
@@ -579,7 +576,7 @@ impl LogEntryStrong {
 
     pub fn strong_ptr_idx<F: RWS>(
         &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> StrongPtrIdx {
         StrongPtrIdx {
@@ -590,7 +587,7 @@ impl LogEntryStrong {
 
     pub fn get_ptr<F: RWS>(
         &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> StrongPtr {
         if self.ptr.is_none() {
@@ -694,7 +691,7 @@ impl LogEntryWeak {
 
     fn as_log_entry_strong<F: RWS>(
         &self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> LogEntryStrong {
         LogEntryStrong {
@@ -705,7 +702,7 @@ impl LogEntryWeak {
 
     pub fn to_strong_ptr_idx<F: RWS>(
         &self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> StrongPtrIdx {
         StrongPtrIdx {
@@ -714,11 +711,7 @@ impl LogEntryWeak {
         }
     }
 
-    pub fn get_ptr<F: RWS>(
-        &self,
-        m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile<F>,
-    ) -> StrongPtr {
+    pub fn get_ptr<F: RWS>(&self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) -> StrongPtr {
         self.ptr
             .upgrade()
             .unwrap_or_else(|| get_ptr(self.file_idx, m, f))
@@ -829,7 +822,7 @@ impl LogPointers {
 
     pub fn get_prev<F: RWS>(
         &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.prev_entry.as_mut().map(|entry| entry.get_ptr(m, f))
@@ -841,7 +834,7 @@ impl LogPointers {
 
     pub fn get_next<F: RWS>(
         &self,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Option<StrongPtr> {
         self.next_entry.as_ref().map(|entry| entry.get_ptr(m, f))
@@ -971,11 +964,7 @@ pub fn set_next_sp(
 }
 
 impl OuterSp {
-    pub fn finish_deserialize<F: RWS>(
-        &mut self,
-        m: &mut FxHashMap<u64, StrongPtr>,
-        f: &mut LogFile<F>,
-    ) {
+    pub fn finish_deserialize<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
         for nxt in self.not_included_ops.iter_mut() {
             nxt.load_pointer(m, f);
         }
@@ -984,7 +973,7 @@ impl OuterSp {
     // returns all operations that have not been included in this SP in the log
     pub fn get_ops_after_iter<'a, F: RWS>(
         &'a self,
-        m: &'a mut FxHashMap<u64, StrongPtr>,
+        m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
     ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>, Error> {
         let (not_included_iter, log_iter) = self.get_iters(m, f)?;
@@ -998,7 +987,7 @@ impl OuterSp {
         &self,
         new_sp: Sp,
         exact: &[EntryInfo],
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<OuterSp, Error> {
         // create a total order iterator over the operations including the unused items from the previous
@@ -1025,7 +1014,7 @@ impl OuterSp {
         new_sp: Sp,
         included: &[EntryInfo],
         not_included: &[EntryInfo],
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<OuterSp, Error> {
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
@@ -1052,7 +1041,7 @@ impl OuterSp {
 
     fn get_iters<'a, F: RWS>(
         &'a self,
-        m: &'a mut FxHashMap<u64, StrongPtr>,
+        m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
     ) -> Result<
         (
@@ -1104,12 +1093,10 @@ impl OuterSp {
             // let op_ptr = nxt_op.get_ptr(m, f);
             let op_ref = nxt_op.ptr.borrow();
             let op = &op_ref.entry.as_op().op;
-            // println!("op index {}", op_ref.entry.as_op().log_index);
             if op.op.info.time > new_sp.info.time {
                 // see if we have passed all ops with smaller times
                 return Err(count);
             }
-            // println!("supported {:#?}", supported);
             // see if we should in include the op
             match supported {
                 Supported::Supported => (),        // normal op
@@ -1119,7 +1106,6 @@ impl OuterSp {
                     return Ok(count);
                 }
             }
-            // println!("add hash {}, sp time {}", nxt_op.get_ptr().borrow().entry.as_op().op.op.info.time, new_sp.info.time);
             // add the hash of the op
             hasher.update(nxt_op.ptr.borrow().entry.as_op().op.hash.as_bytes());
             count += 1;
@@ -1156,7 +1142,7 @@ impl Debug for OuterSp {
 pub fn total_order_iterator<'a, F>(
     start: Option<&LogEntryStrong>,
     forward: bool,
-    m: &'a mut FxHashMap<u64, StrongPtr>,
+    m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 ) -> TotalOrderIterator<'a, F> {
     TotalOrderIterator {
@@ -1170,7 +1156,7 @@ pub fn total_order_iterator<'a, F>(
 pub struct TotalOrderIterator<'a, F> {
     pub prev_entry: Option<LogEntryStrong>,
     pub forward: bool,
-    pub m: &'a mut FxHashMap<u64, StrongPtr>,
+    pub m: &'a mut HashItems<LogEntry>,
     pub f: &'a mut LogFile<F>,
 }
 
@@ -1223,7 +1209,7 @@ impl<'a, F: RWS> Iterator for TotalOrderAfterIterator<'a, F> {
 
 pub fn total_order_after_all_iterator<'a, F>(
     start: Option<&StrongPtrIdx>,
-    m: &'a mut FxHashMap<u64, StrongPtr>,
+    m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 ) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
@@ -1239,7 +1225,7 @@ pub fn total_order_after_all_iterator<'a, F>(
 
 pub fn total_order_after_iterator<'a, F>(
     start: Option<&StrongPtrIdx>,
-    m: &'a mut FxHashMap<u64, StrongPtr>,
+    m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 ) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
@@ -1474,7 +1460,7 @@ where
 
 pub struct LogIterator<'a, F> {
     pub prv_entry: Option<StrongPtrIdx>,
-    pub m: &'a mut FxHashMap<u64, StrongPtr>,
+    pub m: &'a mut HashItems<LogEntry>,
     pub f: &'a mut LogFile<F>,
 }
 
@@ -1499,11 +1485,12 @@ impl<'a, F: RWS> Iterator for LogIterator<'a, F> {
 mod tests {
     use std::{cell::RefCell, rc::Rc};
 
-    use rustc_hash::FxHashMap;
+    use log::debug;
 
     use crate::{
         file_sr::FileSR,
         log::{
+            hash_items::HashItems,
             log_file::open_log_file,
             log_file::LogFile,
             op::{BasicInfo, EntryInfo, OpState},
@@ -1591,7 +1578,7 @@ mod tests {
     fn make_outer_sp<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
         prev_sp: Option<&LogEntryKeep>,
         last_op: Option<&LogEntryKeep>,
@@ -1634,7 +1621,6 @@ mod tests {
             None,
         );
         log_entry.borrow_mut().write_pointers_initial(m, f).unwrap();
-        // println!("entry size {}", log_entry.borrow().ser_size.unwrap());
         f.seek_to(log_entry.borrow().file_index).unwrap();
         let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, m, f).unwrap();
         assert_eq!(*log_entry.borrow(), deser_log_entry);
@@ -1661,21 +1647,22 @@ mod tests {
     fn make_op<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
-        m: &mut FxHashMap<u64, StrongPtr>,
+        m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
         log_entry: StrongPtr,
         prev_to: Option<StrongPtr>,
     ) -> LogEntryKeep {
-        // if let Some(prv) = prev_to.as_ref() {
-        //    println!("prv before: {}", prv.borrow());
-        //}
         let op = make_outer_op(id, log_entry.borrow().log_index + 1, ti, f);
         let log_entry = make_log_entry(op, prev_to.as_ref(), None, Some(&log_entry), None);
-        //println!("new file index {}, log index {}", log_entry.borrow().file_index, log_entry.borrow().log_index);
+        debug!(
+            "new file index {}, log index {}",
+            log_entry.borrow().file_index,
+            log_entry.borrow().log_index
+        );
         f.seek_to(log_entry.borrow().file_index - 8).unwrap();
         assert!(f.check_index().at_end);
         log_entry.borrow_mut().write_pointers_initial(m, f).unwrap();
-        //println!("entry size {}", log_entry.borrow().ser_size.unwrap());
+        debug!("entry size {}", log_entry.borrow().ser_size.unwrap());
         f.seek_to(log_entry.borrow().file_index).unwrap();
         let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, m, f).unwrap();
         assert_eq!(*log_entry.borrow(), deser_log_entry);
@@ -1683,7 +1670,7 @@ mod tests {
         if let Some(prv) = prev_to {
             let deser_prev_to = LogEntry::from_file(prv.borrow().file_index, m, f).unwrap();
             assert_eq!(*prv.borrow(), deser_prev_to);
-            // println!("prv after: {}, deser prv: {}", prv.borrow(), deser_prev_to)
+            debug!("prv after: {}, deser prv: {}", prv.borrow(), deser_prev_to)
         }
         let file_idx = log_entry.borrow().file_index;
         m.clear();
@@ -1698,7 +1685,7 @@ mod tests {
         let mut f = open_log_file("log_files/entry_log0.log", true, FileSR::new).unwrap();
         let mut ti = TimeTest::new();
         let id = 0;
-        let mut m = FxHashMap::default();
+        let mut m = HashItems::default();
 
         // insert the inital sp
         let mut log_entry = make_outer_sp(id, &mut ti, &mut m, &mut f, None, None, vec![]);
