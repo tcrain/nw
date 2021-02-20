@@ -6,10 +6,11 @@ use std::{
 
 use crate::{
     config::Time,
-    errors::{Error, LogError},
+    errors::EncodeError,
     verification::{self, hash, new_hasher, Hash, Id, TimeCheck, TimeInfo},
 };
 
+use super::log_error::{LogError, Result};
 use super::op::{BasicInfo, EntryInfo, EntryInfoData};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -23,8 +24,8 @@ pub struct SpState {
 }
 
 impl SpState {
-    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>, Error> {
-        verification::check_hash(&self.sp, &self.hash, o)
+    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>> {
+        verification::check_hash(&self.sp, &self.hash, o).map_err(LogError::VerifyError)
     }
 
     pub fn new<I, O>(
@@ -34,7 +35,7 @@ impl SpState {
         additional_ops: Vec<EntryInfoData>,
         prev_sp: EntryInfo,
         o: O,
-    ) -> Result<SpState, Error>
+    ) -> Result<SpState>
     where
         I: Iterator<Item = Hash>,
         O: Options,
@@ -43,10 +44,10 @@ impl SpState {
         SpState::from_sp(sp, o)
     }
 
-    pub fn from_sp<O: Options>(sp: Sp, o: O) -> Result<SpState, Error> {
+    pub fn from_sp<O: Options>(sp: Sp, o: O) -> Result<SpState> {
         let enc = o
             .serialize(&sp)
-            .map_err(|_err| Error::LogError(LogError::SerializeError))?;
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))?;
         Ok(SpState {
             sp,
             hash: hash(&enc),
@@ -151,35 +152,35 @@ impl Sp {
         self.info.id == 0 && self.info.time == 0
     }
 
-    pub fn is_init_entry(ei: EntryInfo, init_sp_hash: &Hash) -> Result<bool, Error> {
+    pub fn is_init_entry(ei: EntryInfo, init_sp_hash: &Hash) -> Result<bool> {
         if ei.basic.id == 0 && ei.basic.time == 0 {
             if &ei.hash != init_sp_hash {
-                return Err(Error::LogError(LogError::SpInvalidInitHash));
+                return Err(LogError::SpInvalidInitHash);
             }
             return Ok(true);
         }
         Ok(false)
     }
 
-    pub fn prev_is_init(&self, init_sp_hash: &Hash) -> Result<bool, Error> {
+    pub fn prev_is_init(&self, init_sp_hash: &Hash) -> Result<bool> {
         Sp::is_init_entry(self.prev_sp, init_sp_hash)
     }
 
-    pub fn validate<T>(&self, init_sp_hash: &Hash, ti: &T) -> Result<(), Error>
+    pub fn validate<T>(&self, init_sp_hash: &Hash, ti: &T) -> Result<()>
     where
         T: TimeInfo,
     {
         if self.new_ops_supported == 0 {
             // must support at leat 1 op
-            return Err(Error::LogError(LogError::SpNoOpsSupported));
+            return Err(LogError::SpNoOpsSupported);
         }
         if self.info.time <= self.prev_sp.basic.time {
             // must happen after the previous sp
-            return Err(Error::LogError(LogError::SpPrevLaterTime));
+            return Err(LogError::SpPrevLaterTime);
         }
         if !self.prev_is_init(init_sp_hash)? && self.info.id != self.prev_sp.basic.id {
             // the previous sp must be from the same id
-            return Err(Error::LogError(LogError::SpPrevIdDifferent));
+            return Err(LogError::SpPrevIdDifferent);
         }
         let TimeCheck {
             time_not_passed: _,
@@ -188,7 +189,7 @@ impl Sp {
         } = ti.arrived_time_check(self.info.time);
         if include_in_hash {
             // the sp must arrive after the time operations can arrive
-            return Err(Error::LogError(LogError::SpArrivedEarly));
+            return Err(LogError::SpArrivedEarly);
         }
         Ok(())
     }
@@ -200,12 +201,11 @@ pub mod tests {
     use bincode::{deserialize, options, serialize, Options};
 
     use crate::{
-        errors::{Error, LogError},
         log::op::{BasicInfo, EntryInfo, OpState},
         verification::{hash, Id, TimeInfo, TimeTest},
     };
 
-    use super::{Sp, SpState};
+    use super::{LogError, Sp, SpState};
 
     fn make_sp<O: Options + Copy>(id: Id, ti: &mut TimeTest, o: O) -> SpState {
         let info = EntryInfo {
@@ -263,7 +263,7 @@ pub mod tests {
         .unwrap();
         // the sp must arrive late enough so new operations that are on time will be later in the log
         assert_eq!(
-            Error::LogError(LogError::SpArrivedEarly),
+            LogError::SpArrivedEarly,
             sp1_invalid_time.sp.validate(&init_hash, &ti).unwrap_err()
         );
 
@@ -310,21 +310,21 @@ pub mod tests {
         // clocks cannot be in reverse order
         sp1.sp.prev_sp = sp2.get_entry_info();
         assert_eq!(
-            Error::LogError(LogError::SpPrevLaterTime),
+            LogError::SpPrevLaterTime,
             sp1.sp.validate(&init_hash, &ti).unwrap_err()
         );
 
         // must have same id as prev sp
         sp2.sp.prev_sp.basic.id += 1;
         assert_eq!(
-            Error::LogError(LogError::SpPrevIdDifferent),
+            LogError::SpPrevIdDifferent,
             sp2.sp.validate(&init_hash, &ti).unwrap_err()
         );
 
         // must have at least 1 op supported
         let sp2 = Sp::new(id, ti.now_monotonic(), [].iter().cloned(), vec![], info);
         assert_eq!(
-            Error::LogError(LogError::SpNoOpsSupported),
+            LogError::SpNoOpsSupported,
             sp2.validate(&init_hash, &ti).unwrap_err()
         );
     }

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+mod causal;
 mod config;
 mod errors;
 pub mod file_sr;

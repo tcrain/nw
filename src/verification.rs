@@ -1,12 +1,30 @@
 // use ed25519_dalek::Signature;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    error::Error,
+    fmt::Display,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::{
     config::{Time, ARRIVED_LATE_TIMEOUT, INCLUDE_IN_HASH_TIMEOUT},
-    errors::{Error, LogError},
+    errors::EncodeError,
 };
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerifyError {
+    EncodeError(EncodeError),
+    InvalidHash,
+}
+
+impl Error for VerifyError {}
+
+impl Display for VerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self, f)
+    }
+}
 
 #[derive(Clone, Copy, Hash, Ord, Eq, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
 pub struct Blake3Hash([u8; blake3::OUT_LEN]);
@@ -40,17 +58,17 @@ impl Blake3Hasher {
     }
 }
 
-pub fn check_hash<T, O>(entry: &T, entry_hash: &Hash, o: O) -> Result<Vec<u8>, Error>
+pub fn check_hash<T, O>(entry: &T, entry_hash: &Hash, o: O) -> Result<Vec<u8>, VerifyError>
 where
     T: ?Sized + serde::Serialize,
     O: Options,
 {
     let enc = o
         .serialize(entry)
-        .map_err(|_err| Error::LogError(LogError::SerializeError))?;
+        .map_err(|err| VerifyError::EncodeError(EncodeError(err)))?;
     let new_hash = hash(&enc);
     if *entry_hash != new_hash {
-        return Err(Error::LogError(LogError::InvalidHash));
+        return Err(VerifyError::InvalidHash);
     }
     Ok(enc)
 }

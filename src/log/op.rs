@@ -1,9 +1,7 @@
-use crate::config::Time;
+use super::log_error::{LogError, Result};
 use crate::verification;
-use crate::{
-    errors::{Error, LogError},
-    verification::{Hash, Id},
-};
+use crate::verification::{Hash, Id};
+use crate::{config::Time, errors::EncodeError};
 use bincode::Options;
 use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
@@ -47,7 +45,11 @@ impl Default for EntryInfo {
         }
     }
 }
-
+#[derive(Debug, PartialEq, Eq)]
+pub struct OpEntryInfo {
+    pub op: EntryInfoData,
+    pub log_index: u64,
+}
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct EntryInfoData {
     pub info: EntryInfo,
@@ -61,7 +63,7 @@ pub struct OpState {
 }
 
 impl OpState {
-    pub fn new<T, O>(id: Id, ti: &mut T, o: O) -> Result<OpState, Error>
+    pub fn new<T, O>(id: Id, ti: &mut T, o: O) -> Result<OpState>
     where
         T: TimeInfo,
         O: Options,
@@ -70,14 +72,14 @@ impl OpState {
         OpState::from_op(op, o)
     }
 
-    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>, Error> {
-        verification::check_hash(&self.op, &self.hash, o)
+    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>> {
+        verification::check_hash(&self.op, &self.hash, o).map_err(LogError::VerifyError)
     }
 
-    pub fn from_op<O: Options>(op: Op, o: O) -> Result<OpState, Error> {
+    pub fn from_op<O: Options>(op: Op, o: O) -> Result<OpState> {
         let enc = o
             .serialize(&op)
-            .map_err(|_err| Error::LogError(LogError::SerializeError))?;
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))?;
         let hash = verification::hash(&enc);
         Ok(OpState { op, hash })
     }
@@ -86,6 +88,13 @@ impl OpState {
         EntryInfo {
             hash: self.hash,
             basic: self.op.info,
+        }
+    }
+
+    pub fn get_entry_info_data(&self) -> EntryInfoData {
+        EntryInfoData {
+            info: self.get_entry_info(),
+            data: self.op.data,
         }
     }
 

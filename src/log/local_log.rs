@@ -1,14 +1,16 @@
 use bincode::Options;
+use log::debug;
 
 use crate::{
-    errors::{Error, LogError},
+    errors::EncodeError,
     rw_buf::RWS,
     verification::{Id, TimeInfo},
 };
 
 use super::{
     basic_log::Log,
-    op::{EntryInfo, Op},
+    log_error::{LogError, Result},
+    op::{EntryInfo, Op, OpEntryInfo},
     sp::Sp,
 };
 
@@ -18,7 +20,7 @@ pub struct LocalLog<F: RWS> {
     last_sp: EntryInfo,
 }
 
-pub fn new_local_log<F: RWS>(id: Id, mut l: Log<F>) -> Result<LocalLog<F>, Error> {
+pub fn new_local_log<F: RWS>(id: Id, mut l: Log<F>) -> Result<LocalLog<F>> {
     let last_sp = l
         .get_last_sp_id(id)
         .or_else(|_| l.get_initial_sp())?
@@ -43,20 +45,20 @@ pub struct SpExactToProcess {
 pub struct SpCreated(Vec<u8>);
 
 impl SpCreated {
-    fn to_sp<O: Options>(&self, options: O) -> Result<Sp, Error> {
+    fn to_sp<O: Options>(&self, options: O) -> Result<Sp> {
         options
             .deserialize(&self.0)
-            .map_err(|_err| Error::LogError(LogError::DeserializeError))
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))
     }
 }
 
 pub struct OpCreated(Vec<u8>);
 
 impl OpCreated {
-    fn to_op<O: Options>(&self, options: O) -> Result<Op, Error> {
+    fn to_op<O: Options>(&self, options: O) -> Result<Op> {
         options
             .deserialize(&self.0)
-            .map_err(|_err| Error::LogError(LogError::DeserializeError))
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))
     }
 }
 
@@ -77,7 +79,7 @@ impl OpStatus {
 impl<F: RWS> LocalLog<F> {
     /// Inputs an operation in the log.
     /// Returns the hash of the operation.
-    pub fn create_local_op<T>(&mut self, op: Op, ti: &T) -> Result<(OpCreated, OpStatus), Error>
+    pub fn create_local_op<T>(&mut self, op: Op, ti: &T) -> Result<(OpCreated, OpStatus)>
     where
         T: TimeInfo,
     {
@@ -94,12 +96,13 @@ impl<F: RWS> LocalLog<F> {
         ))
     }
 
+    #[inline(always)]
+    pub fn my_id(&self) -> Id {
+        self.id
+    }
+
     /// Inpts an operation from an external node in the log.
-    pub fn received_op<T>(
-        &mut self,
-        op_c: OpCreated,
-        ti: &T,
-    ) -> Result<(OpCreated, OpStatus), Error>
+    pub fn received_op<T>(&mut self, op_c: OpCreated, ti: &T) -> Result<(OpCreated, OpStatus)>
     where
         T: TimeInfo,
     {
@@ -114,7 +117,7 @@ impl<F: RWS> LocalLog<F> {
         &mut self,
         ti: &mut T,
         sp_p: SpToProcess,
-    ) -> Result<SpToProcess, Error> {
+    ) -> Result<(SpToProcess, Vec<OpEntryInfo>)> {
         let sp = sp_p.sp.to_sp(self.l.f.serialize_option())?;
         self.process_sp(ti, sp, sp_p.late_included, &sp_p.not_included)
     }
@@ -123,7 +126,7 @@ impl<F: RWS> LocalLog<F> {
         &mut self,
         ti: &mut T,
         sp_p: SpExactToProcess,
-    ) -> Result<SpExactToProcess, Error> {
+    ) -> Result<(SpExactToProcess, Vec<OpEntryInfo>)> {
         let sp = sp_p.sp.to_sp(self.l.f.serialize_option())?;
         self.process_sp_exact(ti, sp, sp_p.exact)
     }
@@ -133,8 +136,8 @@ impl<F: RWS> LocalLog<F> {
         ti: &mut T,
         sp: Sp,
         exact: Vec<EntryInfo>,
-    ) -> Result<SpExactToProcess, Error> {
-        let outer_sp = self.l.check_sp_exact(sp, &exact, ti)?;
+    ) -> Result<(SpExactToProcess, Vec<OpEntryInfo>)> {
+        let (outer_sp, ops) = self.l.check_sp_exact(sp, &exact, ti)?;
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if sp.ptr.borrow().entry.get_entry_info().basic.id == self.id {
             // keep our own local last sp so we can consruct our next sp
@@ -145,10 +148,13 @@ impl<F: RWS> LocalLog<F> {
             .entry
             .check_hash(self.l.f.serialize_option())
             .expect("serialization and hash was checked in call to new_op");
-        Ok(SpExactToProcess {
-            sp: SpCreated(serialized),
-            exact,
-        })
+        Ok((
+            SpExactToProcess {
+                sp: SpCreated(serialized),
+                exact,
+            },
+            ops,
+        ))
     }
 
     fn process_sp<T: TimeInfo>(
@@ -157,8 +163,8 @@ impl<F: RWS> LocalLog<F> {
         sp: Sp,
         late_included: Vec<EntryInfo>,
         not_included: &[EntryInfo],
-    ) -> Result<SpToProcess, Error> {
-        let outer_sp = self.l.check_sp(sp, &late_included, &not_included, ti)?;
+    ) -> Result<(SpToProcess, Vec<OpEntryInfo>)> {
+        let (outer_sp, ops) = self.l.check_sp(sp, &late_included, &not_included, ti)?;
         // println!("sp hash {:?}", outer_sp.sp.hash);
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if sp.ptr.borrow().entry.get_entry_info().basic.id == self.id {
@@ -170,22 +176,25 @@ impl<F: RWS> LocalLog<F> {
             .entry
             .check_hash(self.l.f.serialize_option())
             .expect("serialization and hash was checked in call to new_op");
-        Ok(SpToProcess {
-            sp: SpCreated(serialized),
-            not_included: sp_ptr
-                .entry
-                .as_sp()
-                .not_included_ops
-                .iter()
-                .map(|op| op.get_ptr().borrow().entry.get_entry_info())
-                .collect(),
-            late_included,
-        })
+        Ok((
+            SpToProcess {
+                sp: SpCreated(serialized),
+                not_included: sp_ptr
+                    .entry
+                    .as_sp()
+                    .not_included_ops
+                    .iter()
+                    .map(|op| op.get_ptr().borrow().entry.get_entry_info())
+                    .collect(),
+                late_included,
+            },
+            ops,
+        ))
     }
 
     /// Creates a new SP for the local node with the largest time t, including all operations with time before t not already
     /// supported by a previous SP of this node. Any ops with time < t and that have arrived late are included as well.
-    pub fn create_local_sp<T>(&mut self, ti: &mut T) -> Result<SpToProcess, Error>
+    pub fn create_local_sp<T>(&mut self, ti: &mut T) -> Result<(SpToProcess, Vec<OpEntryInfo>)>
     where
         T: TimeInfo,
     {
@@ -193,11 +202,14 @@ impl<F: RWS> LocalLog<F> {
         let sp = {
             // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
-            // println!("create sp at time {}", t);
             let last_sp = self.l.find_sp(self.last_sp)?;
             let last_sp_ref = last_sp.ptr.borrow();
-            // println!("last sp {}, {:?}", last_sp_ref.log_index, last_sp_ref.entry.get_entry_info());
-            // let id = self.id;
+            debug!(
+                "create local sp time {}, last sp {}, {:?}",
+                t,
+                last_sp_ref.log_index,
+                last_sp_ref.entry.get_entry_info()
+            );
             let op_iter = last_sp_ref
                 .entry
                 .as_sp()
@@ -205,7 +217,10 @@ impl<F: RWS> LocalLog<F> {
                 .filter_map(|op_rc| {
                     let op_ref = op_rc.ptr.borrow();
                     let op = op_ref.entry.as_op();
-                    // println!("id {}, time {} add op time {} hash {:?}", id, t, op.op.op.info.time, op.op.hash);
+                    debug!(
+                        "add op to local sp: id {}, time {} add op time {} hash {:?}",
+                        op.op.op.info.id, t, op.op.op.info.time, op.op.hash
+                    );
                     if op.op.op.info.time <= t {
                         if op.arrived_late {
                             late_included.push(op.op.get_entry_info());
@@ -233,7 +248,9 @@ pub mod test_setup {
     use rand::prelude::{SliceRandom, StdRng};
 
     use crate::{
-        log::{basic_log::Log, log_file::open_log_file, log_file::LogFile, op::Op},
+        log::{
+            basic_log::Log, log_file::open_log_file, log_file::LogFile, op::Op, op::OpEntryInfo,
+        },
         rw_buf::RWS,
         verification::{Id, TimeTest},
     };
@@ -263,7 +280,7 @@ pub mod test_setup {
             self.ll.create_local_op(op1, &self.ti).unwrap()
         }
 
-        pub fn create_sp(&mut self) -> SpToProcess {
+        pub fn create_sp(&mut self) -> (SpToProcess, Vec<OpEntryInfo>) {
             self.ti.set_current_time_valid();
             self.ll.create_local_sp(&mut self.ti).unwrap()
         }
@@ -272,7 +289,7 @@ pub mod test_setup {
             self.ll.received_op(op_c, &self.ti).unwrap()
         }
 
-        pub fn got_sp(&mut self, sp_p: SpToProcess) -> SpToProcess {
+        pub fn got_sp(&mut self, sp_p: SpToProcess) -> (SpToProcess, Vec<OpEntryInfo>) {
             self.ll.received_sp(&mut self.ti, sp_p).unwrap()
         }
     }
@@ -314,16 +331,16 @@ pub mod test_setup {
         let num_logs = logs.len();
         let mut new_sps = vec![];
         for (i, l) in logs.iter_mut().enumerate() {
-            let sp = l.create_sp();
+            let (sp, _) = l.create_sp();
             let mut order: Vec<usize> = (0..num_logs as usize).collect();
             order.remove(i as usize); // since this instance already has the op
             order.shuffle(rng); // we want to send each sp to logs in a random order
             new_sps.push((sp, order));
         }
-        while let Some((mut sp, mut order)) = new_sps.pop() {
+        while let Some((sp, mut order)) = new_sps.pop() {
             if let Some(i) = order.pop() {
                 let l = logs.get_mut(i).unwrap();
-                sp = l.got_sp(sp);
+                let (sp, _) = l.got_sp(sp);
                 new_sps.push((sp, order));
             }
         }
@@ -369,7 +386,7 @@ pub mod tests {
         let op_t = op1.info.time;
         ll.create_local_op(op1, &ti).unwrap();
         ti.sleep_op_until_late(op_t);
-        let sp_process = ll.create_local_sp(&mut ti).unwrap();
+        let (sp_process, _) = ll.create_local_sp(&mut ti).unwrap();
         assert_eq!(0, sp_process.not_included.len());
     }
 
@@ -387,7 +404,7 @@ pub mod tests {
         let (_, op_s) = ll.create_local_op(op1.op, &ti).unwrap();
         assert!(!op_s.include_in_hash);
         ti.sleep_op_until_late(op_t);
-        let sp_process = ll.create_local_sp(&mut ti).unwrap();
+        let (sp_process, _) = ll.create_local_sp(&mut ti).unwrap();
         assert_eq!(1, sp_process.late_included.len());
         assert_eq!(0, sp_process.not_included.len());
     }

@@ -5,7 +5,6 @@ use std::{cmp::Ordering, rc::Rc};
 use verification::{hash, TimeCheck, TimeInfo};
 
 use crate::{
-    errors::{Error, LogError},
     rw_buf::RWS,
     verification::{self, Id},
 };
@@ -16,8 +15,9 @@ use super::{
         LogIterator, LogPointers, OuterOp, OuterSp, PrevEntry, StrongPtrIdx, TotalOrderIterator,
         TotalOrderPointers,
     },
+    log_error::{LogError, Result},
     log_file::LogFile,
-    op::{BasicInfo, EntryInfo, Op, OpState},
+    op::{BasicInfo, EntryInfo, Op, OpEntryInfo, OpState},
     sp::SpState,
 };
 use super::{hash_items::HashItems, sp::Sp};
@@ -100,10 +100,10 @@ impl LogItems {
         &mut self,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
-    ) -> Result<StrongPtrIdx, Error> {
+    ) -> Result<StrongPtrIdx> {
         let entry = match self {
-            LogItems::Empty => return Result::Err(Error::LogError(LogError::EmptyLogError)),
-            LogItems::Single(_) => return Result::Err(Error::LogError(LogError::SingleItemLog)),
+            LogItems::Empty => return Err(LogError::EmptyLogError),
+            LogItems::Single(_) => return Err(LogError::SingleItemLog),
             LogItems::Multiple(mi) => {
                 let mut nxt = mi.first_entry.ptr.borrow().get_next();
                 // let ret = mi.first_entry.clone();
@@ -118,7 +118,7 @@ impl LogItems {
                     // there is no first op, so we just drop here
                     //drop_self(&mut mi.first_entry)?;
                     //drop_self(&mut mi.last_entry)?;
-                    return Result::Err(Error::LogError(LogError::SingleItemLog));
+                    return Err(LogError::SingleItemLog);
                 }
                 /*
                 &nxt.borrow_mut().drop_first();
@@ -311,7 +311,7 @@ impl<F: RWS> Log<F> {
         self.init_sp_entry_info
     }
 
-    pub fn get_last_sp_id(&mut self, id: Id) -> Result<StrongPtrIdx, Error> {
+    pub fn get_last_sp_id(&mut self, id: Id) -> Result<StrongPtrIdx> {
         for nxt_sp in self.sp_total_order_iterator() {
             if nxt_sp.ptr.borrow().entry.as_sp().sp.sp.info.id == id
                 && !nxt_sp.ptr.borrow().entry.as_sp().sp.sp.is_init()
@@ -319,14 +319,14 @@ impl<F: RWS> Log<F> {
                 return Ok(nxt_sp);
             }
         }
-        Err(Error::LogError(LogError::IdHasNoSp))
+        Err(LogError::IdHasNoSp)
     }
 
-    pub fn get_initial_sp(&mut self) -> Result<StrongPtrIdx, Error> {
+    pub fn get_initial_sp(&mut self) -> Result<StrongPtrIdx> {
         self.find_sp(self.get_initial_entry_info())
     }
 
-    pub fn find_sp(&mut self, to_find: EntryInfo) -> Result<StrongPtrIdx, Error> {
+    pub fn find_sp(&mut self, to_find: EntryInfo) -> Result<StrongPtrIdx> {
         for nxt_sp in self.sp_total_order_iterator() {
             let ei = nxt_sp.ptr.borrow().entry.as_sp().sp.get_entry_info();
             match ei.cmp(&to_find) {
@@ -343,10 +343,10 @@ impl<F: RWS> Log<F> {
                 Ordering::Greater => (),
             }
         }
-        Err(Error::LogError(LogError::PrevSpNotFound))
+        Err(LogError::PrevSpNotFound)
     }
 
-    fn drop_first(&mut self) -> Result<StrongPtrIdx, Error> {
+    fn drop_first(&mut self) -> Result<StrongPtrIdx> {
         self.first_last.drop_first(&mut self.m, &mut self.f)
         /* match self.first_last.drop_first() {
             Err(e) => Err(e),
@@ -438,7 +438,7 @@ impl<F: RWS> Log<F> {
         included: &[EntryInfo],
         not_included: &[EntryInfo],
         ti: &T,
-    ) -> Result<OuterSp, Error>
+    ) -> Result<(OuterSp, Vec<OpEntryInfo>)>
     where
         T: TimeInfo,
     {
@@ -456,7 +456,7 @@ impl<F: RWS> Log<F> {
         sp: Sp,
         exact: &[EntryInfo],
         ti: &T,
-    ) -> Result<OuterSp, Error>
+    ) -> Result<(OuterSp, Vec<OpEntryInfo>)>
     where
         T: TimeInfo,
     {
@@ -482,7 +482,7 @@ impl<F: RWS> Log<F> {
             .add_item(self.index, file_index, entry, &mut self.m, &mut self.f)
     }
 
-    pub fn insert_outer_sp(&mut self, sp: OuterSp) -> Result<StrongPtrIdx, Error> {
+    pub fn insert_outer_sp(&mut self, sp: OuterSp) -> Result<StrongPtrIdx> {
         let entry = PrevEntry::Sp(sp);
         // add the sp to the log
         let new_sp_ref = self.add_to_log(entry);
@@ -540,7 +540,7 @@ impl<F: RWS> Log<F> {
 
     /// Add an operation to the log. The operation sould be checked for validity before this funciton is called.
     /// If the same operation has already been added to the log an error is returned.
-    pub fn insert_op<T>(&mut self, op: Op, ti: &T) -> Result<StrongPtrIdx, Error>
+    pub fn insert_op<T>(&mut self, op: Op, ti: &T) -> Result<StrongPtrIdx>
     where
         T: TimeInfo,
     {
@@ -570,8 +570,8 @@ impl<F: RWS> Log<F> {
                     prev = Some(nxt);
                     break;
                 }
-                Ordering::Equal => return Err(Error::LogError(LogError::OpAlreadyExists)), // the op already found in the list
-                Ordering::Greater => first_op = Some(nxt), // keep looking
+                Ordering::Equal => return Err(LogError::OpAlreadyExists), // the op already found in the list
+                Ordering::Greater => first_op = Some(nxt),                // keep looking
             }
         }
         if first_op.is_some() && prev.is_some() {
@@ -760,7 +760,7 @@ mod tests {
         let op1_copy = op1;
         l.insert_op(op1, &ti).unwrap();
         assert_eq!(
-            Error::LogError(LogError::OpAlreadyExists),
+            LogError::OpAlreadyExists,
             l.insert_op(op1_copy, &ti).unwrap_err()
         );
         check_log_indicies(&mut l);
@@ -788,10 +788,7 @@ mod tests {
             assert!(entry.upgrade().is_none()) // ensure the entry has been dropped
         }
         // should not drop the last item since there is only a single item
-        assert_eq!(
-            Error::LogError(LogError::SingleItemLog),
-            l.drop_first().unwrap_err()
-        );
+        assert_eq!(LogError::SingleItemLog, l.drop_first().unwrap_err());
         // be sure we can load the items from disk
         for (i, (entry, entry_info)) in l
             .log_iterator_from_end()
@@ -953,10 +950,7 @@ mod tests {
             assert!(entry.upgrade().is_none()) // ensure the entry has been dropped
         }
         // should not drop the last item since there is only a single item
-        assert_eq!(
-            Error::LogError(LogError::SingleItemLog),
-            l.drop_first().unwrap_err()
-        );
+        assert_eq!(LogError::SingleItemLog, l.drop_first().unwrap_err());
 
         // be sure we can load the items from disk
         for (i, (entry, entry_info)) in l
@@ -1107,9 +1101,12 @@ mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let outer_sp1 = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
+        for (ifo, op) in sp1_ops.iter().zip(ops.iter()) {
+            assert_eq!(&op.ptr.borrow().get_op_entry_info(), ifo);
+        }
 
         let m = ops.iter().map(|op| op.ptr.borrow().entry.as_op().op.hash);
         let sp2 = Sp::new(
@@ -1120,9 +1117,12 @@ mod tests {
             l.get_initial_entry_info(),
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let outer_sp2 = l.check_sp(sp2, &[], &[], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l.check_sp(sp2, &[], &[], &ti).unwrap();
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
+        for (ifo, op) in sp2_ops.iter().zip(ops.iter()) {
+            assert_eq!(&op.ptr.borrow().get_op_entry_info(), ifo);
+        }
 
         let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
         let m = ops.iter().map(|op| op.ptr.borrow().entry.as_op().op.hash);
@@ -1165,7 +1165,7 @@ mod tests {
 
         // when input op2 will be used, so it will create a hash error
         assert_eq!(
-            Error::LogError(LogError::SpHashNotComputed),
+            LogError::SpHashNotComputed,
             l.check_sp(sp1, &[], &[], &ti).unwrap_err()
         );
         // use both sp1 and sp2, using included input to check_sp for sp1
@@ -1228,6 +1228,7 @@ mod tests {
             }
             None
         });
+        let m_clone = m.clone();
 
         let id = 0;
         let sp1 = SpState::new(
@@ -1241,11 +1242,14 @@ mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let outer_sp1 = l.check_sp(sp1.sp, &[], &not_included, &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp, &[], &not_included, &ti).unwrap();
         // be sure there are unsupported ops
         assert_eq!(not_included_count, outer_sp1.not_included_ops.len());
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
+        for (ifo, hsh) in sp1_ops.iter().zip(m_clone) {
+            assert_eq!(hsh, ifo.op.info.hash);
+        }
 
         // make an sp with the other items
         let sp2 = Sp::new(
@@ -1256,10 +1260,13 @@ mod tests {
             sp1_info,
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let outer_sp2 = l.check_sp(sp2, &[], &[], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l.check_sp(sp2, &[], &[], &ti).unwrap();
         assert_eq!(0, outer_sp2.not_included_ops.len());
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
+        for (ifo, op) in sp2_ops.iter().zip(not_included.iter()) {
+            assert_eq!(op, &ifo.op.info);
+        }
     }
 
     #[test]
@@ -1279,7 +1286,7 @@ mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         assert_eq!(
-            Error::LogError(LogError::PrevSpHasNoLastOp),
+            LogError::PrevSpHasNoLastOp,
             l.check_sp(sp1.sp, &[], &[], &ti).unwrap_err()
         );
     }
@@ -1309,10 +1316,14 @@ mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let outer_sp1 = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
         assert_eq!(1, outer_sp1.not_included_ops.len());
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
+        for (ifo, op) in sp1_ops.iter().zip([op1].iter()) {
+            assert_eq!(&op.get_entry_info_data(), &ifo.op);
+        }
+
         let sp2 = Sp::new(
             id,
             ti.now_monotonic(),
@@ -1321,10 +1332,13 @@ mod tests {
             sp1_info,
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let outer_sp2 = l.check_sp_exact(sp2, &[op2.get_entry_info()], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l.check_sp_exact(sp2, &[op2.get_entry_info()], &ti).unwrap();
         assert_eq!(0, outer_sp2.not_included_ops.len());
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
+        for (ifo, op) in sp2_ops.iter().zip([op2].iter()) {
+            assert_eq!(&op.get_entry_info_data(), &ifo.op);
+        }
     }
 
     fn insert_ops<F: RWS>(

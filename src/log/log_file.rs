@@ -7,10 +7,10 @@ use std::{
 use bincode::{options, DefaultOptions, Options};
 use log::{error, info};
 
-use crate::{
-    errors::{Error, LogError},
-    rw_buf::RWS,
-};
+use super::log_error::LogError;
+use super::log_error::Result;
+use crate::errors::{EncodeError, LogIOError};
+use crate::rw_buf::RWS;
 
 struct FileWriter<T> {
     // written: Vec<u8>,
@@ -75,7 +75,7 @@ pub fn open_log_file<F: RWS, G: Fn(File) -> F>(
     path_string: &str,
     clear: bool,
     open_fn: G,
-) -> Result<LogFile<F>, Error> {
+) -> Result<LogFile<F>> {
     let path = Path::new(path_string);
     info!("Opening log file {}", path.display());
     let file = open_file(path, clear)?;
@@ -97,12 +97,12 @@ pub fn open_log_file<F: RWS, G: Fn(File) -> F>(
         .file
         .file
         .seek(SeekFrom::End(0))
-        .map_err(|_| Error::LogError(LogError::FileSeekError))?;
+        .map_err(|err| LogError::IOError(LogIOError(err)))?;
     l.seek_to(0)?; // go back to the start
     Ok(l)
 }
 
-fn open_file(path: &Path, truncate: bool) -> Result<File, Error> {
+fn open_file(path: &Path, truncate: bool) -> Result<File> {
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -111,7 +111,7 @@ fn open_file(path: &Path, truncate: bool) -> Result<File, Error> {
         .open(path)
         .map_err(|err| {
             error!("Error opening file: {}", err);
-            Error::LogError(LogError::FileError)
+            LogError::IOError(LogIOError(err))
         })
 }
 
@@ -137,12 +137,12 @@ impl<F: RWS> LogFile<F> {
         }
     }
 
-    pub fn read_u64(&mut self) -> Result<(u64, FileOpInfo), Error> {
+    pub fn read_u64(&mut self) -> Result<(u64, FileOpInfo)> {
         let mut buf: [u8; 8] = [0; 8];
         self.file
             .file
             .read_exact(&mut buf)
-            .map_err(|_| Error::LogError(LogError::FileReadError))?;
+            .map_err(|err| LogError::IOError(LogIOError(err)))?;
         let start_location = self.file_idx;
         self.file_idx += 8;
         if self.file_idx == self.end_idx {
@@ -168,11 +168,11 @@ impl<F: RWS> LogFile<F> {
         }
     }
 
-    pub fn write_u64(&mut self, v: u64) -> Result<FileOpInfo, Error> {
+    pub fn write_u64(&mut self, v: u64) -> Result<FileOpInfo> {
         self.file
             .file
             .write_all(&v.to_ne_bytes())
-            .map_err(|_| Error::LogError(LogError::FileWriteError))?;
+            .map_err(|err| LogError::IOError(LogIOError(err)))?;
         if self.at_end {
             self.end_idx += 8;
         }
@@ -223,13 +223,13 @@ impl<F: RWS> LogFile<F> {
         }
     }
 
-    pub fn seek_to(&mut self, idx: u64) -> Result<(), Error> {
+    pub fn seek_to(&mut self, idx: u64) -> Result<()> {
         if idx == self.file_idx {
             // already at the index, just return
             return Ok(());
         }
         if idx > self.end_idx {
-            return Err(Error::LogError(LogError::FileSeekPastEndError));
+            return Err(LogError::FileSeekPastEndError);
         }
         if idx == self.end_idx {
             self.at_end = true;
@@ -239,7 +239,7 @@ impl<F: RWS> LogFile<F> {
         let seek_amount = idx as i64 - self.file_idx as i64;
         self.file.file.seek_relative(seek_amount).map_err(|err| {
             error!("Error seeking file: {}", err);
-            Error::LogError(LogError::FileSeekError)
+            LogError::IOError(LogIOError(err))
         })?;
         self.file_idx = idx;
         Ok(())
@@ -253,7 +253,7 @@ impl<F: RWS> LogFile<F> {
         self.file_idx
     }
 
-    pub fn append_log<T>(&mut self, entry: &T) -> Result<FileOpInfo, Error>
+    pub fn append_log<T>(&mut self, entry: &T) -> Result<FileOpInfo>
     where
         T: ?Sized + serde::Serialize,
     {
@@ -262,11 +262,11 @@ impl<F: RWS> LogFile<F> {
         }
         self.options
             .serialize_into(&mut self.file, entry)
-            .map_err(|_| Error::LogError(LogError::SerializeError))?;
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))?;
         Ok(self.after_write())
     }
 
-    pub fn read_log_at<T>(&mut self, idx: u64) -> Result<(FileOpInfo, T), Error>
+    pub fn read_log_at<T>(&mut self, idx: u64) -> Result<(FileOpInfo, T)>
     where
         T: serde::de::DeserializeOwned,
     {
@@ -274,19 +274,19 @@ impl<F: RWS> LogFile<F> {
         self.read_log()
     }
 
-    pub fn read_log<T>(&mut self) -> Result<(FileOpInfo, T), Error>
+    pub fn read_log<T>(&mut self) -> Result<(FileOpInfo, T)>
     where
         T: serde::de::DeserializeOwned,
     {
         if self.at_end {
-            return Err(Error::LogError(LogError::EOFError));
+            return Err(LogError::EOFError);
         }
         let e = self
             .options
             .deserialize_from(&mut self.file)
             .map_err(|_err| {
                 // println!("read entry error {}", err);
-                Error::LogError(LogError::DeserializeError)
+                LogError::DeserializeError
             })?;
         let info = self.after_read();
         Ok((info, e))
@@ -296,7 +296,7 @@ impl<F: RWS> LogFile<F> {
 #[cfg(test)]
 mod tests {
     use super::open_log_file;
-    use crate::errors::{Error, LogError};
+    use super::LogError;
     use crate::file_sr::FileSR;
     use bincode::Options;
     use serde::{Deserialize, Serialize};
@@ -354,10 +354,7 @@ mod tests {
         }
         l.seek_to_end();
         assert!(l.at_end);
-        assert_eq!(
-            Error::LogError(LogError::EOFError),
-            l.read_log::<SomeSer>().unwrap_err()
-        );
+        assert_eq!(LogError::EOFError, l.read_log::<SomeSer>().unwrap_err());
     }
 
     #[test]
@@ -370,10 +367,7 @@ mod tests {
             assert_eq!(8, op_info.bytes_consumed);
             assert_eq!(8 * i, op_info.start_location);
         }
-        assert_eq!(
-            Error::LogError(LogError::FileReadError),
-            l.read_u64().unwrap_err()
-        );
+        assert!(l.read_u64().unwrap_err().is_io_error());
         l.seek_to(0).unwrap();
         for i in 0..count {
             let (v, op_info) = l.read_u64().unwrap();
@@ -386,9 +380,6 @@ mod tests {
                 assert!(op_info.at_end);
             }
         }
-        assert_eq!(
-            Error::LogError(LogError::FileReadError),
-            l.read_u64().unwrap_err()
-        );
+        assert!(l.read_u64().unwrap_err().is_io_error());
     }
 }

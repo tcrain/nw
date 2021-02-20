@@ -5,12 +5,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use crate::{
-    errors::{Error, LogError},
-    rw_buf::RWS,
-    utils::result_to_val,
-    verification,
-};
+use crate::{rw_buf::RWS, utils::result_to_val, verification};
 use bincode::Options;
 use itertools::Itertools;
 use log::debug;
@@ -18,8 +13,9 @@ use verification::Hash;
 
 use super::{
     hash_items::HashItems,
+    log_error::{LogError, Result},
     log_file::LogFile,
-    op::{EntryInfo, EntryInfoData, OpState},
+    op::{EntryInfo, EntryInfoData, OpEntryInfo, OpState},
     sp::{Sp, SpState},
 };
 use serde::{Deserialize, Serialize};
@@ -67,11 +63,18 @@ impl LogEntry {
         }
     }
 
+    pub fn get_op_entry_info(&self) -> OpEntryInfo {
+        OpEntryInfo {
+            op: self.entry.as_op().op.get_entry_info_data(),
+            log_index: self.log_index,
+        }
+    }
+
     fn from_file<F: RWS>(
         idx: u64,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
-    ) -> Result<LogEntry, Error> {
+    ) -> Result<LogEntry> {
         f.seek_to(idx)?;
         // first read the serialized bytes
         let (entry_info, mut entry): (_, LogEntry) = f.read_log()?;
@@ -135,7 +138,7 @@ impl LogEntry {
         &mut self,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         // the entry is always added at the end of the log
         f.seek_to_end();
         // First update the previous' next total order pointer, which is at the end of the log where we are now
@@ -253,7 +256,7 @@ impl PrevEntry {
         }
     }
 
-    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>, Error> {
+    pub fn check_hash<O: Options>(&self, o: O) -> Result<Vec<u8>> {
         match self {
             PrevEntry::Sp(sp) => sp.sp.check_hash(o),
             PrevEntry::Op(op) => op.op.check_hash(o),
@@ -556,11 +559,11 @@ impl LogEntryStrong {
         self.ptr.as_ref()
     }
 
-    fn drop_ptr(&mut self) -> Result<StrongPtr, Error> {
+    fn drop_ptr(&mut self) -> Result<StrongPtr> {
         if let Some(ptr) = self.ptr.take() {
             return Ok(ptr);
         }
-        Err(Error::LogError(LogError::OpAlreadyDropped))
+        Err(LogError::OpAlreadyDropped)
     }
 
     pub fn log_entry_keep<F: RWS>(
@@ -852,26 +855,26 @@ impl LogPointers {
     }
 
     // Drop the strong reference to the previous entry if there is one.
-    fn drop_prev(&mut self) -> Result<StrongPtr, Error> {
+    fn drop_prev(&mut self) -> Result<StrongPtr> {
         if let Some(prev) = self.prev_entry.as_mut() {
             return prev.drop_ptr();
         }
-        Err(Error::LogError(LogError::OpAlreadyDropped))
+        Err(LogError::OpAlreadyDropped)
     }
 }
 
 // drops the reference from the input entry, so it will be gc'd even if there is no next
-pub fn drop_self(entry: &mut LogEntryStrong) -> Result<StrongPtr, Error> {
+pub fn drop_self(entry: &mut LogEntryStrong) -> Result<StrongPtr> {
     entry.drop_ptr()
 }
 
 // drops the strong reference to this entry from the next entry, so it will be GC'd.
-pub fn drop_entry(entry: &StrongPtrIdx) -> Result<StrongPtr, Error> {
+pub fn drop_entry(entry: &StrongPtrIdx) -> Result<StrongPtr> {
     // unlink from the next in the log
     if let Some(nxt) = entry.ptr.borrow().log_pointers.get_next_if_in_memory() {
         return nxt.borrow_mut().log_pointers.drop_prev();
     }
-    Err(Error::LogError(LogError::OpAlreadyDropped))
+    Err(LogError::OpAlreadyDropped)
     /*
     // unlink the adjacent nodes
     drop_item_total_order(entry);
@@ -963,6 +966,12 @@ pub fn set_next_sp(
     }
 }
 
+pub struct SpResult {
+    included: Vec<OpEntryInfo>,
+    not_included: Vec<LogEntryKeep>,
+    last_op: Option<LogEntryWeak>,
+}
+
 impl OuterSp {
     pub fn finish_deserialize<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
         for nxt in self.not_included_ops.iter_mut() {
@@ -975,7 +984,7 @@ impl OuterSp {
         &'a self,
         m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
-    ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>, Error> {
+    ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>> {
         let (not_included_iter, log_iter) = self.get_iters(m, f)?;
         let iter = not_included_iter.merge_by(log_iter, |x, y| {
             x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
@@ -989,7 +998,7 @@ impl OuterSp {
         exact: &[EntryInfo],
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
-    ) -> Result<OuterSp, Error> {
+    ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
         // create a total order iterator over the operations including the unused items from the previous
         // SP that takes the exact set from exact, and returns the rest as unused, until last_op
         let (not_included_iter, log_iter) = self.get_iters(m, f)?;
@@ -999,14 +1008,17 @@ impl OuterSp {
             exact.iter().cloned(),
             new_sp.additional_ops.iter().cloned(),
         );
-        let (not_included_ops, last_op) = self.perform_check_sp(&new_sp, op_iter)?;
+        let sp_result = self.perform_check_sp(&new_sp, op_iter)?;
         let sp_state = SpState::from_sp(new_sp, f.serialize_option())?;
-        Ok(OuterSp {
-            sp: sp_state,
-            last_op,
-            not_included_ops,
-            prev_sp: None,
-        })
+        Ok((
+            OuterSp {
+                sp: sp_state,
+                last_op: sp_result.last_op,
+                not_included_ops: sp_result.not_included,
+                prev_sp: None,
+            },
+            sp_result.included,
+        ))
     }
 
     pub fn check_sp_log_order<F: RWS>(
@@ -1016,7 +1028,7 @@ impl OuterSp {
         not_included: &[EntryInfo],
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
-    ) -> Result<OuterSp, Error> {
+    ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
         // it uses included and not included to decide what operations to include
         // furthermore it includes items that have include_in_hash = true and are after the last operation of the previous
@@ -1029,27 +1041,27 @@ impl OuterSp {
             not_included.iter().cloned(),
             new_sp.additional_ops.iter().cloned(),
         );
-        let (not_included_ops, last_op) = self.perform_check_sp(&new_sp, op_iter)?;
+        let sp_result = self.perform_check_sp(&new_sp, op_iter)?;
         let sp_state = SpState::from_sp(new_sp, f.serialize_option())?;
-        Ok(OuterSp {
-            sp: sp_state,
-            last_op,
-            not_included_ops,
-            prev_sp: None,
-        })
+        Ok((
+            OuterSp {
+                sp: sp_state,
+                last_op: sp_result.last_op,
+                not_included_ops: sp_result.not_included,
+                prev_sp: None,
+            },
+            sp_result.included,
+        ))
     }
 
     fn get_iters<'a, F: RWS>(
         &'a self,
         m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
-    ) -> Result<
-        (
-            impl Iterator<Item = StrongPtrIdx> + 'a,
-            TotalOrderAfterIterator<F>,
-        ),
-        Error,
-    > {
+    ) -> Result<(
+        impl Iterator<Item = StrongPtrIdx> + 'a,
+        TotalOrderAfterIterator<F>,
+    )> {
         // we make an iterator that goes through the log in total order
         // the iterator starts from the log entry of the last op included in the previous SP (self) and traverses the log
         // from there in total order, returning the entries that occur later in the log, plus the ops that are in the
@@ -1061,7 +1073,7 @@ impl OuterSp {
         let last_op = self
             .last_op
             .as_ref()
-            .ok_or(Error::LogError(LogError::PrevSpHasNoLastOp))?
+            .ok_or(LogError::PrevSpHasNoLastOp)?
             .to_strong_ptr_idx(m, f);
         // we only want operations after the last op of the previous sp in the log
         let log_iter = if self.sp.sp.is_init() {
@@ -1080,11 +1092,12 @@ impl OuterSp {
         &self,
         new_sp: &Sp,
         mut op_iter: impl Iterator<Item = (Supported, StrongPtrIdx)>,
-    ) -> Result<(Vec<LogEntryKeep>, Option<LogEntryWeak>), Error> {
+    ) -> Result<SpResult> {
         let mut hasher = verification::new_hasher();
         hasher.update(self.sp.hash.as_bytes());
-        let mut not_included_ops = vec![];
+        let mut not_included = vec![];
         let mut last_op = None;
+        let mut included = vec![];
         let count = result_to_val(op_iter.try_fold(0, |mut count, (supported, nxt_op)| {
             if count >= new_sp.new_ops_supported {
                 // see if we already computed enough ops
@@ -1102,23 +1115,30 @@ impl OuterSp {
                 Supported::Supported => (),        // normal op
                 Supported::SupportedData(_) => (), // TODO should do something with this data?
                 Supported::NotSupported => {
-                    not_included_ops.push(nxt_op.to_log_entry_keep()); // Rc::downgrade(&nxt_op));
+                    not_included.push(nxt_op.to_log_entry_keep()); // Rc::downgrade(&nxt_op));
                     return Ok(count);
                 }
             }
+            let nxt_op_ptr = nxt_op.ptr.borrow();
+            let nxt_op_op = nxt_op_ptr.entry.as_op().op;
+            included.push(nxt_op_ptr.get_op_entry_info());
             // add the hash of the op
-            hasher.update(nxt_op.ptr.borrow().entry.as_op().op.hash.as_bytes());
+            hasher.update(nxt_op_op.hash.as_bytes());
             count += 1;
             // update the last op pointer
             last_op = Some(nxt_op.to_log_entry_weak()); // Rc::downgrade(&nxt_op));
             Ok(count)
         }));
         if count != new_sp.new_ops_supported {
-            Err(Error::LogError(LogError::NotEnoughOpsForSP))
+            Err(LogError::NotEnoughOpsForSP)
         } else if new_sp.support_hash == hasher.finalize() {
-            Ok((not_included_ops, last_op))
+            Ok(SpResult {
+                included,
+                not_included,
+                last_op,
+            })
         } else {
-            Err(Error::LogError(LogError::SpHashNotComputed))
+            Err(LogError::SpHashNotComputed)
         }
     }
 
