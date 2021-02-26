@@ -155,6 +155,12 @@ impl TimeInfo for TimeTest {
     }
 }
 
+impl Default for TimeTest {
+    fn default() -> Self {
+        TimeTest::new()
+    }
+}
+
 impl TimeTest {
     pub fn new() -> TimeTest {
         TimeTest {

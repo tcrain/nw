@@ -37,5 +37,14 @@
 			"group": "test",
 			"label": "Rust: cargo bench - nw"
 		},
+		{
+			"type": "cargo",
+			"command": "bench -- causal",
+			"problemMatcher": [
+				"$rustc"
+			],
+			"group": "test",
+			"label": "Rust: cargo bench causal - nw"
+		},
 	],
 }

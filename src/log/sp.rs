@@ -10,8 +10,11 @@ use crate::{
     verification::{self, hash, new_hasher, Hash, Id, TimeCheck, TimeInfo},
 };
 
-use super::log_error::{LogError, Result};
 use super::op::{BasicInfo, EntryInfo, EntryInfoData};
+use super::{
+    log_error::{LogError, Result},
+    LogIdx,
+};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +87,13 @@ impl PartialEq for SpState {
     fn eq(&self, other: &Self) -> bool {
         self.hash.eq(&other.hash)
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SpInfo {
+    pub id: Id,
+    pub log_index: LogIdx,
+    pub prev_sp_log_index: LogIdx, // the log index that this sp comes after
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -5,4 +5,6 @@ pub mod local_log;
 pub mod log_error;
 mod log_file;
 pub mod op;
-mod sp;
+pub mod sp;
+
+pub type LogIdx = u64;

@@ -1,4 +1,7 @@
-use super::log_error::{LogError, Result};
+use super::{
+    log_error::{LogError, Result},
+    LogIdx,
+};
 use crate::verification;
 use crate::verification::{Hash, Id};
 use crate::{config::Time, errors::EncodeError};
@@ -48,7 +51,7 @@ impl Default for EntryInfo {
 #[derive(Debug, PartialEq, Eq)]
 pub struct OpEntryInfo {
     pub op: EntryInfoData,
-    pub log_index: u64,
+    pub log_index: LogIdx,
 }
 #[derive(Copy, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct EntryInfoData {
