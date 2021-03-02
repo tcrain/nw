@@ -283,6 +283,7 @@ impl<F: RWS> Log<F> {
             last_op: None,
             not_included_ops: vec![],
             prev_sp: None,
+            supported_sp_log_index: None,
         };
         l.init_sp_entry_info = init_sp.sp.get_entry_info();
         let outer_sp = l
@@ -323,22 +324,59 @@ impl<F: RWS> Log<F> {
     }
 
     pub fn get_initial_sp(&mut self) -> Result<StrongPtrIdx> {
-        self.find_sp(self.get_initial_entry_info())
+        self.find_sp(self.get_initial_entry_info(), None)
     }
 
-    pub fn find_sp(&mut self, to_find: EntryInfo) -> Result<StrongPtrIdx> {
-        for nxt_sp in self.sp_total_order_iterator() {
+    #[inline(always)]
+    fn equal_sp_check(&mut self, ei: EntryInfo, nxt_sp: StrongPtrIdx) -> Result<StrongPtrIdx> {
+        // if this is the inital SP, we need to be sure it is pointing to the first op in the log
+        if Sp::is_init_entry(ei, &self.init_sp_entry_info.hash)? {
+            nxt_sp.ptr.borrow_mut().entry.mut_as_sp().last_op = self
+                .first_op_to
+                .map(|(idx, _)| LogEntryWeak::from_file_idx(idx))
+        }
+        Ok(nxt_sp)
+    }
+
+    /// Searches for to_find_prev from the end of the log, returning an error if it is not found.
+    /// If to_find_nxt is non-None, then to_find_prev should be the SP that to_find_nxt supports,
+    /// this should be used when checking to insert a new SP.
+    /// If to_find_nxt is found in the log, then LogError::SpAlreadyExists is returned.
+    pub fn find_sp(
+        &mut self,
+        to_find_prev: EntryInfo,
+        to_find_nxt: Option<EntryInfo>,
+    ) -> Result<StrongPtrIdx> {
+        let sp = self
+            .last_sp_total_order
+            .as_ref()
+            .map(|sp| sp.clone_strong());
+        match sp {
+            Some(sp) => self.find_sp_from(to_find_prev, to_find_nxt, sp.clone_strong()),
+            None => Err(LogError::PrevSpNotFound),
+        }
+    }
+
+    /// Same as self.find_sp(), except uses the given iterator
+    pub fn find_sp_from(
+        &mut self,
+        to_find_prev: EntryInfo,
+        mut to_find_nxt: Option<EntryInfo>,
+        from: LogEntryStrong,
+    ) -> Result<StrongPtrIdx> {
+        for nxt_sp in self.sp_total_order_iterator_from(from) {
             let ei = nxt_sp.ptr.borrow().entry.as_sp().sp.get_entry_info();
-            match ei.cmp(&to_find) {
+            if let Some(find_nxt) = to_find_nxt.as_ref() {
+                match ei.cmp(find_nxt) {
+                    Ordering::Less => to_find_nxt = None,
+                    Ordering::Equal => return Err(LogError::SpAlreadyExists),
+                    Ordering::Greater => (),
+                }
+            }
+            match ei.cmp(&to_find_prev) {
                 Ordering::Less => break,
                 Ordering::Equal => {
-                    // if this is the inital SP, we need to be sure it is pointing to the first op in the log
-                    if Sp::is_init_entry(ei, &self.init_sp_entry_info.hash)? {
-                        nxt_sp.ptr.borrow_mut().entry.mut_as_sp().last_op = self
-                            .first_op_to
-                            .map(|(idx, _)| LogEntryWeak::from_file_idx(idx))
-                    }
-                    return Ok(nxt_sp);
+                    return self.equal_sp_check(ei, nxt_sp);
                 }
                 Ordering::Greater => (),
             }
@@ -377,6 +415,15 @@ impl<F: RWS> Log<F> {
         SpLocalTotalOrderIterator {
             id,
             iter: self.sp_total_order_iterator(),
+        }
+    }
+
+    fn sp_total_order_iterator_from(&mut self, sp: LogEntryStrong) -> TotalOrderIterator<F> {
+        TotalOrderIterator {
+            prev_entry: Some(sp),
+            forward: false,
+            m: &mut self.m,
+            f: &mut self.f,
         }
     }
 
@@ -443,12 +490,52 @@ impl<F: RWS> Log<F> {
         T: TimeInfo,
     {
         sp.validate(&self.init_sp_entry_info.hash, ti)?;
-        self.find_sp(sp.prev_sp)?
-            .ptr
-            .borrow()
+        let sp_supported_info = sp.supported_sp_info;
+        let sp_state = SpState::from_sp(sp, &mut self.f.serialize_option())?;
+        let sp_ref = self
+            .find_sp(sp_supported_info, Some(sp_state.get_entry_info()))?
+            .ptr;
+        let sp_ptr = sp_ref.borrow();
+        let prev_sp_log_idx = sp_ptr.log_index;
+        sp_ptr.entry.as_sp().check_sp_log_order(
+            prev_sp_log_idx,
+            sp_state,
+            included.iter().cloned(),
+            not_included.iter().cloned(),
+            &mut self.m,
+            &mut self.f,
+        )
+    }
+
+    pub fn get_sp_exact(&mut self, info: EntryInfo) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
+        if info == self.get_initial_entry_info() {
+            return Err(LogError::IsInitSP);
+        }
+        let sp_ref = self.find_sp(info, None)?;
+        let sp_ptr = sp_ref.ptr.borrow();
+        let sp = sp_ptr.entry.as_sp();
+        let prev_sp_info = sp.sp.sp.supported_sp_info;
+        let prev_sp = self
+            .find_sp_from(prev_sp_info, None, sp_ref.to_log_entry_strong())
+            .expect("should be able to find prev Sp for Sp already decided");
+        let prev_sp_ptr = prev_sp.ptr.borrow();
+        let not_included = sp
+            .not_included_ops
+            .iter()
+            .map(|sp| sp.get_ptr().borrow().entry.get_entry_info());
+        let ret = prev_sp_ptr
             .entry
             .as_sp()
-            .check_sp_log_order(sp, included, not_included, &mut self.m, &mut self.f)
+            .check_sp_log_order(
+                prev_sp_ptr.log_index,
+                sp.sp.clone(),
+                [].iter().cloned(), // TODO
+                not_included,
+                &mut self.m,
+                &mut self.f,
+            )
+            .expect("must be able to generate SP for entry already created");
+        Ok(ret)
     }
 
     pub fn check_sp_exact<T>(
@@ -461,12 +548,20 @@ impl<F: RWS> Log<F> {
         T: TimeInfo,
     {
         sp.validate(&self.init_sp_entry_info.hash, ti)?;
-        self.find_sp(sp.prev_sp)?
-            .ptr
-            .borrow()
-            .entry
-            .as_sp()
-            .check_sp_exact(sp, exact, &mut self.m, &mut self.f)
+        let sp_supported_info = sp.supported_sp_info;
+        let sp_state = SpState::from_sp(sp, &mut self.f.serialize_option())?;
+        let sp_ref = self
+            .find_sp(sp_supported_info, Some(sp_state.get_entry_info()))?
+            .ptr;
+        let sp_ptr = sp_ref.borrow();
+        let prev_sp_log_index = sp_ptr.log_index;
+        sp_ptr.entry.as_sp().check_sp_exact(
+            prev_sp_log_index,
+            sp_state,
+            exact,
+            &mut self.m,
+            &mut self.f,
+        )
     }
 
     fn add_to_log(&mut self, entry: PrevEntry) -> StrongPtrIdx {
@@ -477,7 +572,8 @@ impl<F: RWS> Log<F> {
         if self.index > 1 {
             file_index += 8;
         }
-        // add the sp to the log
+        println!("inserting log index {}", self.index);
+        // add the item to the log
         self.first_last
             .add_item(self.index, file_index, entry, &mut self.m, &mut self.f)
     }
@@ -550,12 +646,6 @@ impl<F: RWS> Log<F> {
             arrived_late,
         } = ti.arrived_time_check(op.info.time);
         let op_state = OpState::from_op(op, self.f.serialize_option())?;
-        let outer_op = PrevEntry::Op(OuterOp {
-            op: op_state,
-            log_index: self.index,
-            include_in_hash,
-            arrived_late,
-        });
         // compute the location of the operation in the total order of the log
         // if the operations is before the first operation in the log, first_op will not be none
         let mut first_op = None;
@@ -582,6 +672,12 @@ impl<F: RWS> Log<F> {
                 prev.is_none()
             ))
         }
+        let outer_op = PrevEntry::Op(OuterOp {
+            op: op_state,
+            log_index: self.index,
+            include_in_hash,
+            arrived_late,
+        });
         // add the op to the log
         let ei = outer_op.get_entry_info();
         let new_op_ref = self.add_to_log(outer_op);
@@ -651,8 +747,48 @@ impl<F: RWS> Log<F> {
     }*/
 }
 
+pub mod test_fns {
+    use super::Log;
+    use crate::log::log_error::LogError;
+    use crate::rw_buf::RWS;
+
+    /// Goes through each SP and verifies its supported log index corresponds correctly to the supported hash.
+    pub fn check_sp_prev<F: RWS>(l: &mut Log<F>, check_last_op: bool) {
+        let mut to_check = vec![];
+        for sp in l.sp_iterator_from_last() {
+            let sp_ref = sp.ptr.as_ref();
+            let sp_ptr = sp_ref.borrow();
+            match sp_ptr.entry.as_sp().supported_sp_log_index {
+                Some(prev_sp_idx) => {
+                    to_check.push((prev_sp_idx, sp_ptr.entry.as_sp().sp.sp.supported_sp_info))
+                }
+                None => assert!(sp_ptr.entry.as_sp().prev_sp.is_none()),
+            }
+        }
+        for (log_idx, entry) in to_check {
+            if check_last_op {
+                let res = l.get_sp_exact(entry);
+                if entry == l.get_initial_entry_info() {
+                    assert_eq!(Err(LogError::IsInitSP), res);
+                } else {
+                    res.expect("unable to get sp exact");
+                }
+            }
+            assert_eq!(
+                log_idx,
+                l.find_sp(entry, None)
+                    .unwrap()
+                    .ptr
+                    .as_ref()
+                    .borrow()
+                    .log_index
+            )
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use bincode::Options;
     use std::{
         cmp,
@@ -661,16 +797,20 @@ mod tests {
     };
 
     use crate::{
-        file_sr::FileSR, log::hash_items::DEFAULT_MAX_ENTRIES, log::op::tests::make_op_late,
-        rw_buf::RWBuf, verification::TimeTest,
+        file_sr::FileSR,
+        log::hash_items::DEFAULT_MAX_ENTRIES,
+        log::{entry::StrongPtr, op::tests::make_op_late},
+        rw_buf::RWBuf,
+        verification::TimeTest,
     };
 
     use crate::log::{
         entry::{total_order_after_iterator, total_order_iterator},
         log_file::open_log_file,
-        op::{get_empty_data, EntryInfo, EntryInfoData},
+        op::{gen_rand_data, get_empty_data, EntryInfoData},
     };
 
+    use super::test_fns::check_sp_prev;
     use super::*;
 
     fn get_log_file_direct(idx: usize) -> LogFile<FileSR> {
@@ -689,10 +829,11 @@ mod tests {
     fn check_iter_total_order<T: Iterator<Item = StrongPtrIdx>>(i: T) {
         for op in i {
             // check we have the right pointers for the log
-            if let Some(prv) = op.ptr.borrow().to_pointers.get_prev_to_strong() {
+            if let Some(prv) = op.ptr.as_ref().borrow().to_pointers.get_prev_to_strong() {
                 let prv_ptr = prv.get_ptr_in_memory().unwrap();
                 assert_eq!(
                     prv_ptr
+                        .as_ref()
                         .borrow()
                         .to_pointers
                         .get_next_to_strong()
@@ -702,12 +843,13 @@ mod tests {
                 );
                 assert_eq!(
                     op.ptr
+                        .as_ref()
                         .borrow()
                         .to_pointers
                         .get_prev_to_strong()
                         .unwrap()
                         .file_idx,
-                    prv_ptr.borrow().file_index
+                    prv_ptr.as_ref().borrow().file_index
                 );
             }
         }
@@ -718,10 +860,11 @@ mod tests {
         check_iter_total_order(l.sp_total_order_iterator()); // check we have the right pointers for the sps in log
                                                              // check the log entry pointers
         for op in l.log_iterator_from_end() {
-            if let Some(prv) = op.ptr.borrow().get_prev() {
+            if let Some(prv) = op.ptr.as_ref().borrow().get_prev() {
                 assert_eq!(
                     prv.get_ptr_in_memory()
                         .unwrap()
+                        .as_ref()
                         .borrow()
                         .get_next()
                         .unwrap()
@@ -729,8 +872,12 @@ mod tests {
                     op.file_idx
                 );
                 assert_eq!(
-                    op.ptr.borrow().get_prev().unwrap().file_idx,
-                    prv.get_ptr_in_memory().unwrap().borrow().file_index
+                    op.ptr.as_ref().borrow().get_prev().unwrap().file_idx,
+                    prv.get_ptr_in_memory()
+                        .unwrap()
+                        .as_ref()
+                        .borrow()
+                        .file_index
                 );
             }
         }
@@ -741,7 +888,7 @@ mod tests {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(0));
         for _ in 0..5 {
-            let _ = l.insert_op(Op::new(1, &mut ti), &ti);
+            let _ = l.insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti);
             check_log_indicies(&mut l);
         }
         let mut items = vec![];
@@ -749,6 +896,8 @@ mod tests {
             items.push(op);
         }
         assert_eq!(6, items.len()); // six since the first entry is the init SP
+                                    // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -756,14 +905,16 @@ mod tests {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(1));
         let id = 1;
-        let op1 = Op::new(id, &mut ti);
-        let op1_copy = op1;
+        let op1 = Op::new(id, gen_rand_data(), &mut ti);
+        let op1_copy = op1.clone();
         l.insert_op(op1, &ti).unwrap();
         assert_eq!(
             LogError::OpAlreadyExists,
             l.insert_op(op1_copy, &ti).unwrap_err()
         );
         check_log_indicies(&mut l);
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -773,9 +924,11 @@ mod tests {
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let op_count = 5;
         for _ in 0..op_count {
-            let op = l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+            let op = l
+                .insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti)
+                .unwrap();
             check_log_indicies(&mut l);
-            entry_infos.push(op.ptr.borrow().entry.get_entry_info());
+            entry_infos.push(op.ptr.as_ref().borrow().entry.get_entry_info());
         }
         // clear the memory map so we dont have extra references
         l.m.clear();
@@ -796,27 +949,33 @@ mod tests {
             .enumerate()
         {
             let idx = op_count + 1 - i as u64;
-            assert_eq!(idx, entry.ptr.borrow().log_index);
-            assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info())
+            assert_eq!(idx, entry.ptr.as_ref().borrow().log_index);
+            assert_eq!(
+                entry_info,
+                &entry.ptr.as_ref().borrow().entry.get_entry_info()
+            )
         }
         // check we can still add ops
-        l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+        l.insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti)
+            .unwrap();
         assert_eq!(
             op_count + 1,
             l.op_total_order_iterator_from_last().count() as u64
         );
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
     fn op_iterator() {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(3));
-        let op1 = OpState::new(1, &mut ti, l.f.serialize_option()).unwrap();
-        let op2 = OpState::new(2, &mut ti, l.f.serialize_option()).unwrap();
-        let op3 = OpState::new(3, &mut ti, l.f.serialize_option()).unwrap();
-        let op1_clone = op1;
-        let op2_clone = op2;
-        let op3_clone = op3;
+        let op1 = OpState::new(1, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op2 = OpState::new(2, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op3 = OpState::new(3, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op1_clone = op1.clone();
+        let op2_clone = op2.clone();
+        let op3_clone = op3.clone();
         // insert the op in reserve order of creation
         let _ = l.insert_op(op2.op, &ti);
         check_log_indicies(&mut l);
@@ -829,15 +988,15 @@ mod tests {
             let mut iter = l.op_total_order_iterator_from_last();
             assert_eq!(
                 op3_clone,
-                iter.next().unwrap().ptr.borrow().entry.as_op().op
+                iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert_eq!(
                 op2_clone,
-                iter.next().unwrap().ptr.borrow().entry.as_op().op
+                iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert_eq!(
                 op1_clone,
-                iter.next().unwrap().ptr.borrow().entry.as_op().op
+                iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert!(iter.next().is_none());
             let mut iter = total_order_iterator(
@@ -848,15 +1007,15 @@ mod tests {
             );
             assert_eq!(
                 op1_clone,
-                iter.next().unwrap().ptr.borrow().entry.as_op().op
+                iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert_eq!(
                 op2_clone,
-                iter.next().unwrap().ptr.borrow().entry.as_op().op
+                iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert_eq!(
                 op3_clone,
-                iter.next().unwrap().ptr.borrow().entry.as_op().op
+                iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert!(iter.next().is_none());
 
@@ -864,7 +1023,15 @@ mod tests {
             let mut after_iter = total_order_after_iterator(Some(&first_entry), &mut l.m, &mut l.f);
             assert_eq!(
                 op1_clone,
-                after_iter.next().unwrap().ptr.borrow().entry.as_op().op
+                after_iter
+                    .next()
+                    .unwrap()
+                    .ptr
+                    .as_ref()
+                    .borrow()
+                    .entry
+                    .as_op()
+                    .op
             );
             assert!(after_iter.next().is_none()); // no values since this is the last item in the log
         }
@@ -875,17 +1042,19 @@ mod tests {
         let mut iter = l.op_total_order_iterator_from_last();
         assert_eq!(
             op3_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_op().op
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
         );
         assert_eq!(
             op2_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_op().op
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
         );
         assert_eq!(
             op1_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_op().op
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
         );
         assert!(iter.next().is_none());
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -894,13 +1063,19 @@ mod tests {
         let mut l = Log::new(get_log_file(4));
         let num_sp = 5;
         let id = 1;
-        let mut prev_sp_info = l.get_initial_entry_info();
+        // let mut prev_sp_info = l.get_initial_entry_info();
+        let mut prev_sp = l.get_initial_sp().unwrap().ptr;
         for _ in 0..num_sp {
             let new_sp = l
-                .insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti, l.f.serialize_option()))
+                .insert_outer_sp(gen_sp(
+                    id,
+                    Rc::clone(&prev_sp),
+                    &mut ti,
+                    l.f.serialize_option(),
+                ))
                 .unwrap();
             check_log_indicies(&mut l);
-            prev_sp_info = new_sp.ptr.borrow().entry.as_sp().sp.get_entry_info();
+            prev_sp = new_sp.ptr;
         }
         let mut items = vec![];
         for nxt in l.sp_iterator_from_last() {
@@ -921,6 +1096,8 @@ mod tests {
         assert_eq!(num_sp, items.len());
 
         assert!(l.sp_local_total_order_iterator(id + 1).next().is_none());
+        // check the sp prev pointers
+        check_sp_prev(&mut l, false);
     }
 
     #[test]
@@ -930,14 +1107,14 @@ mod tests {
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let num_sp = 5;
         let id = 1;
-        let mut prev_sp_info = l.get_initial_entry_info();
+        let mut prev_sp = l.get_initial_sp().unwrap().ptr;
         for _ in 0..num_sp {
             let new_sp = l
-                .insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti, l.f.serialize_option()))
+                .insert_outer_sp(gen_sp(id, prev_sp, &mut ti, l.f.serialize_option()))
                 .unwrap();
             check_log_indicies(&mut l);
-            prev_sp_info = new_sp.ptr.borrow().entry.as_sp().sp.get_entry_info();
-            entry_infos.push(new_sp.ptr.borrow().entry.get_entry_info());
+            prev_sp = Rc::clone(&new_sp.ptr);
+            entry_infos.push(new_sp.ptr.as_ref().borrow().entry.get_entry_info());
         }
         // clear the memory map so we dont have extra references
         l.m.clear();
@@ -959,36 +1136,37 @@ mod tests {
             .enumerate()
         {
             let idx = num_sp + 1 - i as u64;
-            assert_eq!(idx, entry.ptr.borrow().log_index);
-            assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info())
+            assert_eq!(idx, entry.ptr.as_ref().borrow().log_index);
+            assert_eq!(
+                entry_info,
+                &entry.ptr.as_ref().borrow().entry.get_entry_info()
+            )
         }
         // check we can still add sps
-        l.insert_outer_sp(gen_sp(id, prev_sp_info, &mut ti, l.f.serialize_option()))
+        l.insert_outer_sp(gen_sp(id, prev_sp, &mut ti, l.f.serialize_option()))
             .unwrap();
         // be sure we have num_sp + 2 sps (+2 because of the inital log entry plus the additional one added)
         assert_eq!(num_sp + 2, l.sp_iterator_from_last().count() as u64);
         assert_eq!(num_sp + 2, l.sp_total_order_iterator().count() as u64);
+        // check the sp prev pointers
+        check_sp_prev(&mut l, false);
     }
 
     #[test]
     fn sp_iterator() {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(6));
-        let mut last_sps: HashMap<Id, EntryInfo> = HashMap::new();
+        let mut last_sps: HashMap<Id, StrongPtr> = HashMap::new();
         let num_ids = 5;
         let num_sps = 5;
 
         for _ in 0..num_sps {
             for i in 0..num_ids {
+                let prev_sp = get_entry_info(i, &mut l, &last_sps);
                 let new_sp = l
-                    .insert_outer_sp(gen_sp(
-                        i,
-                        get_entry_info(i, &l, &last_sps),
-                        &mut ti,
-                        l.f.serialize_option(),
-                    ))
+                    .insert_outer_sp(gen_sp(i, prev_sp, &mut ti, l.f.serialize_option()))
                     .unwrap();
-                last_sps.insert(i, new_sp.ptr.borrow().entry.as_sp().sp.get_entry_info());
+                last_sps.insert(i, new_sp.ptr);
             }
         }
 
@@ -1010,13 +1188,13 @@ mod tests {
         let iter_id = 0;
         let sp1 = gen_sp(
             iter_id,
-            get_entry_info(iter_id, &l, &last_sps),
+            get_entry_info(iter_id, &mut l, &last_sps),
             &mut ti,
             l.f.serialize_option(),
         );
         let sp2 = gen_sp(
             iter_id,
-            get_entry_info(iter_id, &l, &last_sps),
+            get_entry_info(iter_id, &mut l, &last_sps),
             &mut ti,
             l.f.serialize_option(),
         );
@@ -1031,44 +1209,46 @@ mod tests {
         let mut iter = l.sp_iterator_from_last();
         assert_eq!(
             sp1_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_sp().sp
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_sp().sp
         );
         assert_eq!(
             sp2_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_sp().sp
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_sp().sp
         );
 
         // total order should be in reverse insert order
         let mut iter = l.sp_total_order_iterator();
         assert_eq!(
             sp2_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_sp().sp
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_sp().sp
         );
         assert_eq!(
             sp1_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_sp().sp
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_sp().sp
         );
 
         // local total order should be in reverse insert order
         let mut iter = l.sp_local_total_order_iterator(iter_id);
         assert_eq!(
             sp2_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_sp().sp
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_sp().sp
         );
         assert_eq!(
             sp1_clone,
-            iter.next().unwrap().ptr.borrow().entry.as_sp().sp
+            iter.next().unwrap().ptr.as_ref().borrow().entry.as_sp().sp
         );
+        // check the sp prev pointers
+        check_sp_prev(&mut l, false);
     }
 
-    fn gen_sp<O: Options + Copy>(id: u64, prev_sp: EntryInfo, ti: &mut TimeTest, o: O) -> OuterSp {
-        let hsh = OpState::new(1, ti, o).unwrap().hash;
+    fn gen_sp<O: Options + Copy>(id: u64, prev_sp: StrongPtr, ti: &mut TimeTest, o: O) -> OuterSp {
+        let hsh = OpState::new(1, gen_rand_data(), ti, o).unwrap().hash;
         let sp = SpState::new(
             id,
             ti.now_monotonic(),
             [hsh].iter().cloned(),
             vec![],
-            prev_sp,
+            prev_sp.as_ref().borrow().entry.get_entry_info(),
             o,
         )
         .unwrap();
@@ -1076,8 +1256,11 @@ mod tests {
         OuterSp {
             sp,
             not_included_ops: vec![],
-            prev_sp: None,
+            prev_sp: None, /*Some(LogEntryWeak::from_file_idx(
+                               prev_sp.as_ref().borrow().file_index,
+                           )),*/
             last_op: None,
+            supported_sp_log_index: Some(prev_sp.as_ref().borrow().log_index),
         }
     }
 
@@ -1088,7 +1271,9 @@ mod tests {
         let num_ids = 5;
         let num_ops = 5;
         let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
-        let m = ops.iter().map(|op| op.ptr.borrow().entry.as_op().op.hash);
+        let m = ops
+            .iter()
+            .map(|op| op.ptr.as_ref().borrow().entry.as_op().op.hash);
         let id = 0;
         let sp1 = SpState::new(
             id,
@@ -1101,14 +1286,21 @@ mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp.clone(), &[], &[], &ti).unwrap();
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp1_ops.iter().zip(ops.iter()) {
-            assert_eq!(&op.ptr.borrow().get_op_entry_info(), ifo);
+            assert_eq!(&op.ptr.as_ref().borrow().get_op_entry_info(), ifo);
         }
+        // be sure we dont insert the duplicate
+        assert_eq!(
+            LogError::SpAlreadyExists,
+            l.check_sp(sp1.sp, &[], &[], &ti).unwrap_err()
+        );
 
-        let m = ops.iter().map(|op| op.ptr.borrow().entry.as_op().op.hash);
+        let m = ops
+            .iter()
+            .map(|op| op.ptr.as_ref().borrow().entry.as_op().op.hash);
         let sp2 = Sp::new(
             id + 1,
             ti.now_monotonic(),
@@ -1121,14 +1313,18 @@ mod tests {
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp2_ops.iter().zip(ops.iter()) {
-            assert_eq!(&op.ptr.borrow().get_op_entry_info(), ifo);
+            assert_eq!(&op.ptr.as_ref().borrow().get_op_entry_info(), ifo);
         }
 
         let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
-        let m = ops.iter().map(|op| op.ptr.borrow().entry.as_op().op.hash);
+        let m = ops
+            .iter()
+            .map(|op| op.ptr.as_ref().borrow().entry.as_op().op.hash);
         let sp3 = Sp::new(id, ti.now_monotonic(), m, vec![], sp1_info);
         ti.set_sp_time_valid(sp3.info.time);
         let _outer_sp3 = l.check_sp(sp3, &[], &[], &ti).unwrap();
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -1137,18 +1333,18 @@ mod tests {
         let mut l = Log::new(get_log_file(8));
         let id = 0;
         let op1 = make_op_late(
-            OpState::new(id, &mut ti, l.f.serialize_option()).unwrap(),
+            OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap(),
             l.f.serialize_option(),
         );
-        let outer_op1 = l.insert_op(op1.op, &ti).unwrap();
+        let outer_op1 = l.insert_op(op1.op.clone(), &ti).unwrap();
         check_log_indicies(&mut l);
-        assert!(outer_op1.ptr.borrow().entry.as_op().arrived_late);
+        assert!(outer_op1.ptr.as_ref().borrow().entry.as_op().arrived_late);
 
         // op2 will be included as normal op
-        let op2 = OpState::new(id, &mut ti, l.f.serialize_option()).unwrap();
+        let op2 = OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
         let outer_op2 = l.insert_op(op2.op, &ti).unwrap();
         check_log_indicies(&mut l);
-        assert!(!outer_op2.ptr.borrow().entry.as_op().arrived_late);
+        assert!(!outer_op2.ptr.as_ref().borrow().entry.as_op().arrived_late);
 
         let sp1 = Sp::new(
             id,
@@ -1159,7 +1355,7 @@ mod tests {
         );
         ti.set_sp_time_valid(sp1.info.time);
         // op3 has a later time so should not be included
-        let op3 = Op::new(id, &mut ti);
+        let op3 = Op::new(id, gen_rand_data(), &mut ti);
         check_log_indicies(&mut l);
         l.insert_op(op3, &ti).unwrap();
 
@@ -1195,6 +1391,8 @@ mod tests {
         );
         ti.set_sp_time_valid(sp1.info.time);
         l.check_sp(sp1, &[], &[], &ti).unwrap();
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -1208,7 +1406,7 @@ mod tests {
         let not_included: Vec<_> = ops
             .iter()
             .filter_map(|op_rc| {
-                let op_ref = op_rc.ptr.borrow();
+                let op_ref = op_rc.ptr.as_ref().borrow();
                 let op = op_ref.entry.as_op();
                 if op.log_index % 2 != 0 {
                     // dont include he non even ones
@@ -1220,7 +1418,7 @@ mod tests {
         let not_included_count = not_included.len();
         // the included ops are the even ones
         let m = ops.iter().filter_map(|op_rc| {
-            let op_ref = op_rc.ptr.borrow();
+            let op_ref = op_rc.ptr.as_ref().borrow();
             let op = op_ref.entry.as_op();
             if op.log_index % 2 == 0 {
                 // only take the even ones
@@ -1267,6 +1465,8 @@ mod tests {
         for (ifo, op) in sp2_ops.iter().zip(not_included.iter()) {
             assert_eq!(op, &ifo.op.info);
         }
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -1274,7 +1474,7 @@ mod tests {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(10));
         let id = 0;
-        let op1 = OpState::new(id, &mut ti, l.f.serialize_option()).unwrap();
+        let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
         let sp1 = SpState::new(
             id,
             ti.now_monotonic(),
@@ -1289,6 +1489,8 @@ mod tests {
             LogError::PrevSpHasNoLastOp,
             l.check_sp(sp1.sp, &[], &[], &ti).unwrap_err()
         );
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -1296,14 +1498,14 @@ mod tests {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(11));
         let id = 0;
-        let op1 = OpState::new(id, &mut ti, l.f.serialize_option()).unwrap();
+        let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
         let op2 = make_op_late(
-            OpState::new(id, &mut ti, l.f.serialize_option()).unwrap(),
+            OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap(),
             l.f.serialize_option(),
         );
-        l.insert_op(op2.op, &ti).unwrap();
+        l.insert_op(op2.op.clone(), &ti).unwrap();
         check_log_indicies(&mut l);
-        l.insert_op(op1.op, &ti).unwrap();
+        l.insert_op(op1.op.clone(), &ti).unwrap();
         check_log_indicies(&mut l);
         let sp1 = SpState::new(
             id,
@@ -1339,6 +1541,8 @@ mod tests {
         for (ifo, op) in sp2_ops.iter().zip([op2].iter()) {
             assert_eq!(&op.get_entry_info_data(), &ifo.op);
         }
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     fn insert_ops<F: RWS>(
@@ -1350,17 +1554,21 @@ mod tests {
         let mut ret = vec![];
         for _ in 0..num_ops {
             for i in 0..num_ids {
-                ret.push(l.insert_op(Op::new(i, ti), ti).unwrap());
+                ret.push(l.insert_op(Op::new(i, gen_rand_data(), ti), ti).unwrap());
                 check_log_indicies(l);
             }
         }
         ret
     }
 
-    fn get_entry_info<F: RWS>(id: Id, l: &Log<F>, last_sps: &HashMap<Id, EntryInfo>) -> EntryInfo {
+    fn get_entry_info<F: RWS>(
+        id: Id,
+        l: &mut Log<F>,
+        last_sps: &HashMap<Id, StrongPtr>,
+    ) -> StrongPtr {
         match last_sps.get(&id) {
-            Some(ei) => *ei,
-            None => l.get_initial_entry_info(),
+            Some(ei) => Rc::clone(ei),
+            None => l.get_initial_sp().unwrap().ptr,
         }
     }
 
@@ -1372,13 +1580,15 @@ mod tests {
         let mut entries = VecDeque::new();
         let op_count = DEFAULT_MAX_ENTRIES + 10;
         for i in 0..op_count {
-            let op = l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+            let op = l
+                .insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti)
+                .unwrap();
             // we should have no more than the max entires in memory
             assert_eq!(
                 cmp::min(i + 2, DEFAULT_MAX_ENTRIES),
                 l.m.recent_entries_count() as usize
             );
-            entry_infos.push(op.ptr.borrow().entry.get_entry_info());
+            entry_infos.push(op.ptr.as_ref().borrow().entry.get_entry_info());
             entries.push_back(op);
             if entries.len() > DEFAULT_MAX_ENTRIES {
                 // be sure we have dropped the earlier entry
@@ -1393,15 +1603,21 @@ mod tests {
             .enumerate()
         {
             let idx = (op_count + 1 - i) as u64;
-            assert_eq!(idx, entry.ptr.borrow().log_index);
-            assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info())
+            assert_eq!(idx, entry.ptr.as_ref().borrow().log_index);
+            assert_eq!(
+                entry_info,
+                &entry.ptr.as_ref().borrow().entry.get_entry_info()
+            )
         }
         // check we can still add ops
-        l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
+        l.insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti)
+            .unwrap();
         assert_eq!(
             (op_count + 1) as u64,
             l.op_total_order_iterator_from_last().count() as u64
         );
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]
@@ -1411,8 +1627,10 @@ mod tests {
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let op_count = DEFAULT_MAX_ENTRIES * 4;
         for _ in 0..op_count {
-            let op = l.insert_op(Op::new(1, &mut ti), &ti).unwrap();
-            entry_infos.push(op.ptr.borrow().entry.get_entry_info());
+            let op = l
+                .insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti)
+                .unwrap();
+            entry_infos.push(op.ptr.as_ref().borrow().entry.get_entry_info());
         }
         // clear the map
         // l.m.clear();
@@ -1424,8 +1642,11 @@ mod tests {
             .enumerate()
         {
             let idx = (op_count + 1 - i) as u64;
-            assert_eq!(idx, entry.ptr.borrow().log_index);
-            assert_eq!(entry_info, &entry.ptr.borrow().entry.get_entry_info());
+            assert_eq!(idx, entry.ptr.as_ref().borrow().log_index);
+            assert_eq!(
+                entry_info,
+                &entry.ptr.as_ref().borrow().entry.get_entry_info()
+            );
             if i >= DEFAULT_MAX_ENTRIES {
                 // after default max entires, we will start loading items from disk
                 items.push_back(entry);
@@ -1436,6 +1657,8 @@ mod tests {
                 }
             }
         }
+        // check the sp prev pointers
+        check_sp_prev(&mut l, true);
     }
 
     #[test]

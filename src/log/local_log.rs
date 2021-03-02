@@ -11,7 +11,7 @@ use super::{
     basic_log::Log,
     log_error::{LogError, Result},
     op::{EntryInfo, Op, OpEntryInfo},
-    sp::Sp,
+    sp::{Sp, SpInfo},
 };
 
 pub struct LocalLog<F: RWS> {
@@ -31,17 +31,22 @@ pub fn new_local_log<F: RWS>(id: Id, mut l: Log<F>) -> Result<LocalLog<F>> {
     Ok(LocalLog { id, l, last_sp })
 }
 
+#[derive(Debug, Clone)]
 pub struct SpToProcess {
     pub sp: SpCreated,
+    pub info: SpInfo,
     pub not_included: Vec<EntryInfo>, // all operations with time less that the SP time that were not included
     pub late_included: Vec<EntryInfo>, // late operations that were included
 }
 
+#[derive(Debug)]
 pub struct SpExactToProcess {
     pub sp: SpCreated,
+    pub info: SpInfo,
     pub exact: Vec<EntryInfo>,
 }
 
+#[derive(Debug, Clone)]
 pub struct SpCreated(Vec<u8>);
 
 impl SpCreated {
@@ -52,6 +57,7 @@ impl SpCreated {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct OpCreated(Vec<u8>);
 
 impl OpCreated {
@@ -62,6 +68,14 @@ impl OpCreated {
     }
 }
 
+#[derive(Debug)]
+pub struct OpResult {
+    pub create: OpCreated,
+    pub status: OpStatus,
+    pub info: OpEntryInfo,
+}
+
+#[derive(Debug)]
 pub struct OpStatus {
     pub include_in_hash: bool,
     pub arrived_late: bool,
@@ -79,7 +93,7 @@ impl OpStatus {
 impl<F: RWS> LocalLog<F> {
     /// Inputs an operation in the log.
     /// Returns the hash of the operation.
-    pub fn create_local_op<T>(&mut self, op: Op, ti: &T) -> Result<(OpCreated, OpStatus)>
+    pub fn create_local_op<T>(&mut self, op: Op, ti: &T) -> Result<OpResult>
     where
         T: TimeInfo,
     {
@@ -90,10 +104,11 @@ impl<F: RWS> LocalLog<F> {
             .check_hash(self.l.f.serialize_option())
             .expect("serialization and hash was checked in call to new_op");
         let op = op_ptr.entry.as_op();
-        Ok((
-            OpCreated(serialized),
-            OpStatus::new(op.include_in_hash, op.arrived_late),
-        ))
+        Ok(OpResult {
+            info: op_ptr.get_op_entry_info(),
+            create: OpCreated(serialized),
+            status: OpStatus::new(op.include_in_hash, op.arrived_late),
+        })
     }
 
     #[inline(always)]
@@ -102,15 +117,20 @@ impl<F: RWS> LocalLog<F> {
     }
 
     /// Inpts an operation from an external node in the log.
-    pub fn received_op<T>(&mut self, op_c: OpCreated, ti: &T) -> Result<(OpCreated, OpStatus)>
+    pub fn received_op<T>(&mut self, op_c: OpCreated, ti: &T) -> Result<OpResult>
     where
         T: TimeInfo,
     {
         let op = op_c.to_op(self.l.f.serialize_option())?;
         let op_log = self.l.insert_op(op, ti)?;
         let op_ptr = op_log.ptr.borrow();
+        let op_info = op_ptr.get_op_entry_info();
         let op = op_ptr.entry.as_op();
-        Ok((op_c, OpStatus::new(op.include_in_hash, op.arrived_late)))
+        Ok(OpResult {
+            create: op_c,
+            status: OpStatus::new(op.include_in_hash, op.arrived_late),
+            info: op_info,
+        })
     }
 
     pub fn received_sp<T: TimeInfo>(
@@ -137,6 +157,7 @@ impl<F: RWS> LocalLog<F> {
         sp: Sp,
         exact: Vec<EntryInfo>,
     ) -> Result<(SpExactToProcess, Vec<OpEntryInfo>)> {
+        let id = sp.info.id;
         let (outer_sp, ops) = self.l.check_sp_exact(sp, &exact, ti)?;
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if sp.ptr.borrow().entry.get_entry_info().basic.id == self.id {
@@ -152,6 +173,11 @@ impl<F: RWS> LocalLog<F> {
             SpExactToProcess {
                 sp: SpCreated(serialized),
                 exact,
+                info: SpInfo {
+                    id,
+                    log_index: sp_ptr.log_index,
+                    supported_sp_log_index: sp_ptr.entry.as_sp().supported_sp_log_index,
+                },
             },
             ops,
         ))
@@ -164,10 +190,11 @@ impl<F: RWS> LocalLog<F> {
         late_included: Vec<EntryInfo>,
         not_included: &[EntryInfo],
     ) -> Result<(SpToProcess, Vec<OpEntryInfo>)> {
+        let id = sp.info.id;
         let (outer_sp, ops) = self.l.check_sp(sp, &late_included, &not_included, ti)?;
         // println!("sp hash {:?}", outer_sp.sp.hash);
         let sp = self.l.insert_outer_sp(outer_sp)?;
-        if sp.ptr.borrow().entry.get_entry_info().basic.id == self.id {
+        if id == self.id {
             // keep our own local last sp so we can consruct our next sp
             self.last_sp = sp.ptr.borrow().entry.get_entry_info();
         }
@@ -187,6 +214,11 @@ impl<F: RWS> LocalLog<F> {
                     .map(|op| op.get_ptr().borrow().entry.get_entry_info())
                     .collect(),
                 late_included,
+                info: SpInfo {
+                    id,
+                    log_index: sp_ptr.log_index,
+                    supported_sp_log_index: sp_ptr.entry.as_sp().supported_sp_log_index,
+                },
             },
             ops,
         ))
@@ -202,7 +234,7 @@ impl<F: RWS> LocalLog<F> {
         let sp = {
             // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
-            let last_sp = self.l.find_sp(self.last_sp)?;
+            let last_sp = self.l.find_sp(self.last_sp, None)?;
             let last_sp_ref = last_sp.ptr.borrow();
             debug!(
                 "create local sp time {}, last sp {}, {:?}",
@@ -247,15 +279,20 @@ pub mod test_setup {
 
     use rand::prelude::{SliceRandom, StdRng};
 
+    use crate::log::basic_log::test_fns::check_sp_prev;
     use crate::{
         log::{
-            basic_log::Log, log_file::open_log_file, log_file::LogFile, op::Op, op::OpEntryInfo,
+            basic_log::Log,
+            log_file::open_log_file,
+            log_file::LogFile,
+            op::Op,
+            op::{gen_rand_data, OpEntryInfo},
         },
         rw_buf::RWS,
         verification::{Id, TimeTest},
     };
 
-    use super::{new_local_log, LocalLog, OpCreated, OpStatus, SpToProcess};
+    use super::{new_local_log, LocalLog, OpCreated, OpResult, SpToProcess};
 
     pub struct LogTest<F: RWS> {
         ll: LocalLog<F>,
@@ -275,22 +312,26 @@ pub mod test_setup {
     }
 
     impl<F: RWS> LogTest<F> {
-        pub fn create_op(&mut self) -> (OpCreated, OpStatus) {
-            let op1 = Op::new(self.id, &mut self.ti);
+        pub fn create_op(&mut self) -> OpResult {
+            let op1 = Op::new(self.id, gen_rand_data(), &mut self.ti);
             self.ll.create_local_op(op1, &self.ti).unwrap()
         }
 
         pub fn create_sp(&mut self) -> (SpToProcess, Vec<OpEntryInfo>) {
             self.ti.set_current_time_valid();
-            self.ll.create_local_sp(&mut self.ti).unwrap()
+            let ret = self.ll.create_local_sp(&mut self.ti).unwrap();
+            check_sp_prev(&mut self.ll.l, true);
+            ret
         }
 
-        pub fn got_op(&mut self, op_c: OpCreated) -> (OpCreated, OpStatus) {
+        pub fn got_op(&mut self, op_c: OpCreated) -> OpResult {
             self.ll.received_op(op_c, &self.ti).unwrap()
         }
 
         pub fn got_sp(&mut self, sp_p: SpToProcess) -> (SpToProcess, Vec<OpEntryInfo>) {
-            self.ll.received_sp(&mut self.ti, sp_p).unwrap()
+            let ret = self.ll.received_sp(&mut self.ti, sp_p).unwrap();
+            check_sp_prev(&mut self.ll.l, true);
+            ret
         }
     }
 
@@ -302,16 +343,16 @@ pub mod test_setup {
         let num_logs = logs.len();
         let mut new_ops = vec![];
         for (i, l) in logs.iter_mut().enumerate() {
-            let (op, _) = l.create_op();
+            let op_result = l.create_op();
             let mut order: Vec<usize> = (0..num_logs as usize).collect();
             order.remove(i as usize); // since this instance already has the op
             order.shuffle(rng); // we want to send each op to logs in a random order
-            new_ops.push((i, op, order));
+            new_ops.push((i, op_result.create, order));
         }
         while let Some((idx, mut op, mut order)) = new_ops.pop() {
             if let Some(i) = order.pop() {
                 // println!("add op {} to {}", i, idx);
-                op = logs.get_mut(i).unwrap().got_op(op).0;
+                op = logs.get_mut(i).unwrap().got_op(op).create;
                 new_ops.push((idx, op, order));
             }
         }
@@ -353,7 +394,7 @@ pub mod tests {
     use crate::{
         log::{
             basic_log::Log,
-            op::{tests::make_op_late, Op, OpState},
+            op::{gen_rand_data, tests::make_op_late, Op, OpState},
         },
         rw_buf::RWBuf,
         verification::TimeTest,
@@ -372,7 +413,7 @@ pub mod tests {
         let id = 0;
         let l = Log::new(get_log_file(0, RWBuf::new));
         let mut ll = new_local_log(id, l).unwrap();
-        let op1 = Op::new(id, &mut ti);
+        let op1 = Op::new(id, gen_rand_data(), &mut ti);
         ll.create_local_op(op1, &ti).unwrap();
     }
 
@@ -382,7 +423,7 @@ pub mod tests {
         let id = 0;
         let l = Log::new(get_log_file(1, RWBuf::new));
         let mut ll = new_local_log(id, l).unwrap();
-        let op1 = Op::new(id, &mut ti);
+        let op1 = Op::new(id, gen_rand_data(), &mut ti);
         let op_t = op1.info.time;
         ll.create_local_op(op1, &ti).unwrap();
         ti.sleep_op_until_late(op_t);
@@ -397,12 +438,12 @@ pub mod tests {
         let l = Log::new(get_log_file(2, RWBuf::new));
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = make_op_late(
-            OpState::new(id, &mut ti, ll.l.f.serialize_option()).unwrap(),
+            OpState::new(id, gen_rand_data(), &mut ti, ll.l.f.serialize_option()).unwrap(),
             ll.l.f.serialize_option(),
         );
         let op_t = op1.op.info.time;
-        let (_, op_s) = ll.create_local_op(op1.op, &ti).unwrap();
-        assert!(!op_s.include_in_hash);
+        let op_result = ll.create_local_op(op1.op, &ti).unwrap();
+        assert!(!op_result.status.include_in_hash);
         ti.sleep_op_until_late(op_t);
         let (sp_process, _) = ll.create_local_sp(&mut ti).unwrap();
         assert_eq!(1, sp_process.late_included.len());
@@ -419,9 +460,12 @@ pub mod tests {
         let num_ops = 5;
         for i in 0..num_ops {
             let l = logs.get_mut((i % num_logs) as usize).unwrap();
-            let (mut op, _) = l.create_op();
+            let mut op_result = l.create_op();
             for j in i + 1..i + num_logs {
-                op = logs.get_mut((j % num_logs) as usize).unwrap().got_op(op).0;
+                op_result = logs
+                    .get_mut((j % num_logs) as usize)
+                    .unwrap()
+                    .got_op(op_result.create);
             }
         }
     }

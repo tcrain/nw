@@ -1,10 +1,11 @@
-mod basic_log;
+pub(crate) mod basic_log;
 mod entry;
 mod hash_items;
 pub mod local_log;
-pub mod log_error;
-mod log_file;
-pub mod op;
-pub mod sp;
+pub(crate) mod log_error;
+pub(crate) mod log_file;
+pub(crate) mod op;
+pub(crate) mod ordered_log;
+pub(crate) mod sp;
 
 pub type LogIdx = u64;

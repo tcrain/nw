@@ -93,7 +93,7 @@ impl PartialEq for SpState {
 pub struct SpInfo {
     pub id: Id,
     pub log_index: LogIdx,
-    pub prev_sp_log_index: LogIdx, // the log index that this sp comes after
+    pub supported_sp_log_index: Option<LogIdx>, // the log index that this sp comes after
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -102,7 +102,7 @@ pub struct Sp {
     pub new_ops_supported: SupportCount, // number of new operations supported by this sp
     pub support_hash: Hash,
     // data: OpData,
-    pub prev_sp: EntryInfo, // the sp that this one comes after
+    pub supported_sp_info: EntryInfo, // the sp that this one comes after
     // pub unsupported_ops: Vec<EntryInfo>, // operations before this entry in the log not supported by this item
     pub additional_ops: Vec<EntryInfoData>, // operations smaller than the time, but included
                                             // verify: Verify,
@@ -142,7 +142,7 @@ impl Sp {
         Sp {
             info: BasicInfo { time, id },
             new_ops_supported: op_count,
-            prev_sp,
+            supported_sp_info: prev_sp,
             additional_ops,
             support_hash: hasher.finalize(),
         }
@@ -153,7 +153,7 @@ impl Sp {
             info: BasicInfo { time: 0, id: 0 },
             support_hash: hash(&[]),
             new_ops_supported: 0,
-            prev_sp: ei,
+            supported_sp_info: ei,
             additional_ops: vec![],
         }
     }
@@ -173,7 +173,7 @@ impl Sp {
     }
 
     pub fn prev_is_init(&self, init_sp_hash: &Hash) -> Result<bool> {
-        Sp::is_init_entry(self.prev_sp, init_sp_hash)
+        Sp::is_init_entry(self.supported_sp_info, init_sp_hash)
     }
 
     pub fn validate<T>(&self, init_sp_hash: &Hash, ti: &T) -> Result<()>
@@ -184,11 +184,11 @@ impl Sp {
             // must support at leat 1 op
             return Err(LogError::SpNoOpsSupported);
         }
-        if self.info.time <= self.prev_sp.basic.time {
+        if self.info.time <= self.supported_sp_info.basic.time {
             // must happen after the previous sp
             return Err(LogError::SpPrevLaterTime);
         }
-        if !self.prev_is_init(init_sp_hash)? && self.info.id != self.prev_sp.basic.id {
+        if !self.prev_is_init(init_sp_hash)? && self.info.id != self.supported_sp_info.basic.id {
             // the previous sp must be from the same id
             return Err(LogError::SpPrevIdDifferent);
         }
@@ -211,7 +211,7 @@ pub mod tests {
     use bincode::{deserialize, options, serialize, Options};
 
     use crate::{
-        log::op::{BasicInfo, EntryInfo, OpState},
+        log::op::{gen_rand_data, BasicInfo, EntryInfo, OpState},
         verification::{hash, Id, TimeInfo, TimeTest},
     };
 
@@ -222,7 +222,7 @@ pub mod tests {
             basic: BasicInfo { time: 0, id },
             hash: hash(b"init msg"),
         };
-        let ops = [OpState::new(1, ti, o).unwrap()];
+        let ops = [OpState::new(1, gen_rand_data(), ti, o).unwrap()];
 
         SpState::new(
             id,
@@ -260,7 +260,7 @@ pub mod tests {
         };
         // let init_hash = hash(b"init hash");
         let init_hash = info.hash;
-        let ops = [OpState::new(1, &mut ti, options()).unwrap()];
+        let ops = [OpState::new(1, gen_rand_data(), &mut ti, options()).unwrap()];
 
         let sp1_invalid_time = SpState::new(
             id,
@@ -318,14 +318,14 @@ pub mod tests {
         assert!(sp1 == sp3);
 
         // clocks cannot be in reverse order
-        sp1.sp.prev_sp = sp2.get_entry_info();
+        sp1.sp.supported_sp_info = sp2.get_entry_info();
         assert_eq!(
             LogError::SpPrevLaterTime,
             sp1.sp.validate(&init_hash, &ti).unwrap_err()
         );
 
         // must have same id as prev sp
-        sp2.sp.prev_sp.basic.id += 1;
+        sp2.sp.supported_sp_info.basic.id += 1;
         assert_eq!(
             LogError::SpPrevIdDifferent,
             sp2.sp.validate(&init_hash, &ti).unwrap_err()

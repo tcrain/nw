@@ -17,6 +17,7 @@ use super::{
     log_file::LogFile,
     op::{EntryInfo, EntryInfoData, OpEntryInfo, OpState},
     sp::{Sp, SpState},
+    LogIdx,
 };
 use serde::{Deserialize, Serialize};
 
@@ -945,7 +946,8 @@ impl Display for OuterOp {
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct OuterSp {
     pub sp: SpState,
-    pub last_op: Option<LogEntryWeak>, // the last op in the total order this sp supported
+    pub supported_sp_log_index: Option<LogIdx>, // the log index of the sp that this entry supports
+    pub last_op: Option<LogEntryWeak>,          // the last op in the total order this sp supported
     pub not_included_ops: Vec<LogEntryKeep>, // the ops before last_op in the log that are not included in the sp
     pub prev_sp: Option<LogEntryWeak>,       // the previous sp in the total order in the log
 }
@@ -979,7 +981,7 @@ impl OuterSp {
         }
     }
 
-    // returns all operations that have not been included in this SP in the log
+    /// Returns an iterator that contains all operations that have not been included in this SP in the log.
     pub fn get_ops_after_iter<'a, F: RWS>(
         &'a self,
         m: &'a mut HashItems<LogEntry>,
@@ -994,7 +996,8 @@ impl OuterSp {
 
     pub fn check_sp_exact<F: RWS>(
         &self,
-        new_sp: Sp,
+        my_log_idx: LogIdx,
+        new_sp: SpState,
         exact: &[EntryInfo],
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
@@ -1006,26 +1009,31 @@ impl OuterSp {
             not_included_iter,
             log_iter,
             exact.iter().cloned(),
-            new_sp.additional_ops.iter().cloned(),
+            new_sp.sp.additional_ops.iter().cloned(),
         );
-        let sp_result = self.perform_check_sp(&new_sp, op_iter)?;
-        let sp_state = SpState::from_sp(new_sp, f.serialize_option())?;
+        let sp_result = self.perform_check_sp(&new_sp.sp, op_iter)?;
         Ok((
             OuterSp {
-                sp: sp_state,
+                sp: new_sp,
                 last_op: sp_result.last_op,
                 not_included_ops: sp_result.not_included,
                 prev_sp: None,
+                supported_sp_log_index: Some(my_log_idx),
             },
             sp_result.included,
         ))
     }
 
-    pub fn check_sp_log_order<F: RWS>(
+    pub fn check_sp_log_order<
+        F: RWS,
+        J: Iterator<Item = EntryInfo>,
+        K: Iterator<Item = EntryInfo>,
+    >(
         &self,
-        new_sp: Sp,
-        included: &[EntryInfo],
-        not_included: &[EntryInfo],
+        my_log_idx: LogIdx,
+        new_sp: SpState,
+        included: J,
+        not_included: K,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
@@ -1037,18 +1045,18 @@ impl OuterSp {
         let op_iter = total_order_check_iterator(
             not_included_iter,
             log_iter,
-            included.iter().cloned(),
-            not_included.iter().cloned(),
-            new_sp.additional_ops.iter().cloned(),
+            included,
+            not_included,
+            new_sp.sp.additional_ops.iter().cloned(),
         );
-        let sp_result = self.perform_check_sp(&new_sp, op_iter)?;
-        let sp_state = SpState::from_sp(new_sp, f.serialize_option())?;
+        let sp_result = self.perform_check_sp(&new_sp.sp, op_iter)?;
         Ok((
             OuterSp {
-                sp: sp_state,
+                sp: new_sp,
                 last_op: sp_result.last_op,
                 not_included_ops: sp_result.not_included,
                 prev_sp: None,
+                supported_sp_log_index: Some(my_log_idx),
             },
             sp_result.included,
         ))
@@ -1120,10 +1128,10 @@ impl OuterSp {
                 }
             }
             let nxt_op_ptr = nxt_op.ptr.borrow();
-            let nxt_op_op = nxt_op_ptr.entry.as_op().op;
+            let nxt_op_op = nxt_op_ptr.entry.as_op();
             included.push(nxt_op_ptr.get_op_entry_info());
             // add the hash of the op
-            hasher.update(nxt_op_op.hash.as_bytes());
+            hasher.update(nxt_op_op.op.hash.as_bytes());
             count += 1;
             // update the last op pointer
             last_op = Some(nxt_op.to_log_entry_weak()); // Rc::downgrade(&nxt_op));
@@ -1387,7 +1395,8 @@ where
         }
         if let Some(last_extra_info) = self.last_extra_info.as_ref() {
             if last_extra_info.info == entry {
-                return Some(*last_extra_info);
+                // TODO should return ref instead of clone?
+                return Some(last_extra_info.clone());
             }
         }
         None
@@ -1396,32 +1405,34 @@ where
 
 // total order iterator that only includes log entries with a larger (or equal) log index than the input,
 // except for those that are supported/unsupported
-pub struct TotalOrderCheckIterator<'a, J, K>
+pub struct TotalOrderCheckIterator<'a, J, K, L>
 where
     J: Iterator<Item = EntryInfo>,
+    L: Iterator<Item = EntryInfo>,
     K: Iterator<Item = EntryInfoData>,
 {
     iter: Box<dyn Iterator<Item = StrongPtrIdx> + 'a>,
     extra_info_check: ExtraInfoCheck<K>,
     included_check: IncludedCheck<J>,
-    not_included_check: IncludedCheck<J>,
+    not_included_check: IncludedCheck<L>,
 }
 
 //fn entry_less_than(x: &LogEntryStrong, y: &LogEntryStrong) -> bool {
 //  x.get_ptr().borrow().entry.get_entry_info() <= y.get_ptr().borrow().entry.get_entry_info()
 //}
 
-pub fn total_order_check_iterator<'a, J, K, I, F: RWS>(
+pub fn total_order_check_iterator<'a, J, K, L, I, F: RWS>(
     prev_not_included: I,
     log_iter: TotalOrderAfterIterator<'a, F>,
     included: J,
-    not_included: J,
+    not_included: L,
     extra_info: K,
-) -> TotalOrderCheckIterator<'a, J, K>
+) -> TotalOrderCheckIterator<'a, J, K, L>
 where
     I: Iterator<Item = StrongPtrIdx> + 'a,
     J: Iterator<Item = EntryInfo>,
     K: Iterator<Item = EntryInfoData>,
+    L: Iterator<Item = EntryInfo>,
 {
     // now we merge the prev_not_included and the log_iter into a single iterator them so we traverse the two of them in total order
     let iter = Box::new(log_iter.merge_by(prev_not_included, |x, y| {
@@ -1444,10 +1455,11 @@ where
     }
 }
 
-impl<'a, J, K> Iterator for TotalOrderCheckIterator<'a, J, K>
+impl<'a, J, K, L> Iterator for TotalOrderCheckIterator<'a, J, K, L>
 where
     J: Iterator<Item = EntryInfo>,
     K: Iterator<Item = EntryInfoData>,
+    L: Iterator<Item = EntryInfo>,
 {
     type Item = (Supported, StrongPtrIdx);
 
@@ -1513,8 +1525,9 @@ mod tests {
             hash_items::HashItems,
             log_file::open_log_file,
             log_file::LogFile,
-            op::{BasicInfo, EntryInfo, OpState},
+            op::{gen_rand_data, BasicInfo, EntryInfo, OpState},
             sp::SpState,
+            LogIdx,
         },
         rw_buf::RWS,
         verification::{hash, Id, TimeInfo, TimeTest},
@@ -1579,11 +1592,11 @@ mod tests {
 
     fn make_outer_op<F: RWS>(
         id: Id,
-        log_index: u64,
+        log_index: LogIdx,
         ti: &mut TimeTest,
         f: &LogFile<F>,
     ) -> PrevEntry {
-        let op = OpState::new(id, ti, f.serialize_option()).unwrap();
+        let op = OpState::new(id, gen_rand_data(), ti, f.serialize_option()).unwrap();
         let outer_op = OuterOp {
             log_index,
             op,
@@ -1604,15 +1617,21 @@ mod tests {
         last_op: Option<&LogEntryKeep>,
         not_included_ops: Vec<LogEntryKeep>,
     ) -> LogEntryKeep {
-        let prev_sp_info = match prev_sp.as_ref() {
-            None => EntryInfo {
-                basic: BasicInfo {
-                    time: ti.now_monotonic(),
-                    id,
+        let (prev_sp_info, prev_sp_log_index) = match prev_sp.as_ref() {
+            None => (
+                EntryInfo {
+                    basic: BasicInfo {
+                        time: ti.now_monotonic(),
+                        id,
+                    },
+                    hash: hash(b"some msg"),
                 },
-                hash: hash(b"some msg"),
-            },
-            Some(sp) => sp.get_ptr().borrow().entry.get_entry_info(),
+                None,
+            ),
+            Some(sp) => (
+                sp.get_ptr().borrow().entry.get_entry_info(),
+                Some(sp.get_ptr().borrow().log_index),
+            ),
         };
         let sp_state = SpState::new(
             id,
@@ -1629,7 +1648,8 @@ mod tests {
             sp: sp_state,
             last_op: last_op.map(|op| op.to_log_entry_weak()),
             not_included_ops,
-            prev_sp: prev_sp.as_ref().map(|op| op.to_log_entry_weak()),
+            prev_sp: None, // prev_sp.as_ref().map(|op| op.to_log_entry_weak()),
+            supported_sp_log_index: prev_sp_log_index,
         };
         let entry = PrevEntry::Sp(outer_sp);
         entry.check_hash(f.serialize_option()).unwrap();
