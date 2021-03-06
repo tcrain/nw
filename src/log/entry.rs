@@ -353,11 +353,11 @@ impl TotalOrderPointers {
     }
 
     pub fn get_prev_to_strong(&self) -> Option<LogEntryStrong> {
-        self.prev_to.as_ref().map(|entry| entry.clone_strong())
+        self.prev_to.as_ref().map(|entry| entry.into())
     }
 
     pub fn get_next_to_strong(&self) -> Option<LogEntryStrong> {
-        self.next_to.as_ref().map(|entry| entry.clone_strong())
+        self.next_to.as_ref().map(|entry| entry.into())
     }
 }
 
@@ -370,7 +370,7 @@ pub fn set_next_total_order<F: RWS>(
     match prev.ptr.borrow().to_pointers.next_to.as_ref() {
         None => (),
         Some(nxt) => {
-            new_next.ptr.borrow_mut().to_pointers.next_to = Some(nxt.clone_weak());
+            new_next.ptr.borrow_mut().to_pointers.next_to = Some(nxt.clone());
             nxt.get_ptr(m, f).borrow_mut().to_pointers.prev_to = Some(new_next.into());
         }
     };
@@ -511,6 +511,15 @@ impl From<&StrongPtrIdx> for LogEntryStrong {
     }
 }
 
+impl From<&LogEntryWeak> for LogEntryStrong {
+    fn from(le: &LogEntryWeak) -> Self {
+        LogEntryStrong {
+            file_idx: le.file_idx,
+            ptr: le.ptr.upgrade(),
+        }
+    }
+}
+
 impl From<StrongPtrIdx> for LogEntryStrong {
     fn from(le: StrongPtrIdx) -> Self {
         LogEntryStrong {
@@ -565,6 +574,13 @@ impl LogEntryStrong {
         LogEntryStrong {
             file_idx,
             ptr: Some(ptr),
+        }
+    }
+
+    pub fn from_file_idx(file_idx: u64) -> LogEntryStrong {
+        LogEntryStrong {
+            file_idx,
+            ptr: None,
         }
     }
 
@@ -667,7 +683,7 @@ impl Default for LogEntryStrong {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct LogEntryWeak {
     file_idx: u64,
     #[serde(skip)]
@@ -754,20 +770,6 @@ impl LogEntryWeak {
     // Returns the object at the next pointer only if it is already in memory
     fn get_prt_if_in_memory(&self) -> Option<StrongPtr> {
         self.ptr.upgrade()
-    }
-
-    pub fn clone_weak(&self) -> LogEntryWeak {
-        LogEntryWeak {
-            file_idx: self.file_idx,
-            ptr: Weak::clone(&self.ptr),
-        }
-    }
-
-    pub fn clone_strong(&self) -> LogEntryStrong {
-        LogEntryStrong {
-            file_idx: self.file_idx,
-            ptr: self.ptr.upgrade(),
-        }
     }
 }
 
@@ -875,7 +877,7 @@ impl LogPointers {
     }
 
     pub fn get_next_strong(&self) -> Option<LogEntryStrong> {
-        self.next_entry.as_ref().map(|entry| entry.clone_strong())
+        self.next_entry.as_ref().map(|entry| entry.into())
     }
 
     // Returns the object at the next pointer only if it is already in memory
@@ -1197,7 +1199,7 @@ impl OuterSp {
     }
 
     pub fn get_prev_sp(&self) -> Option<LogEntryStrong> {
-        self.prev_sp.as_ref().map(|prv| prv.clone_strong())
+        self.prev_sp.as_ref().map(|prv| prv.into())
     }
 }
 
@@ -1262,7 +1264,15 @@ impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
     }
 }
 
-// total order iterator that only includes log entries with a larger (or equal) log index than the input
+// sp.not_included are all ops that are not late, and are not included in the SP
+// - this will never change at the local log because any ops that arrives later will be late
+
+// but how to track the ops that are late?
+pub struct LogIteratorAfterSorted {
+    pub prev_entry: Option<LogEntryStrong>,
+}
+
+/// total order iterator that only includes log entries with a larger (or equal) log index than the input
 pub struct TotalOrderAfterIterator<'a, F> {
     iter: TotalOrderIterator<'a, F>,
     min_index: u64,

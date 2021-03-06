@@ -40,7 +40,7 @@ impl<'a> Deref for PrevEntryHolder<'a> {
     }
 }
 
-// Iterates the SP entries in log order
+// Iterates the SP entries in log order by decreasing times
 struct SpIterator<'a, F> {
     prev_entry: Option<LogEntryStrong>,
     m: &'a mut HashItems<LogEntry>,
@@ -348,12 +348,9 @@ impl<F: RWS> Log<F> {
         to_find_prev: EntryInfo,
         to_find_nxt: Option<EntryInfo>,
     ) -> Result<StrongPtrIdx> {
-        let sp = self
-            .last_sp_total_order
-            .as_ref()
-            .map(|sp| sp.clone_strong());
+        let sp: Option<LogEntryStrong> = self.last_sp_total_order.as_ref().map(|sp| sp.into());
         match sp {
-            Some(sp) => self.find_sp_from(to_find_prev, to_find_nxt, sp.clone_strong()),
+            Some(sp) => self.find_sp_from(to_find_prev, to_find_nxt, sp),
             None => Err(LogError::PrevSpNotFound),
         }
     }
@@ -432,7 +429,7 @@ impl<F: RWS> Log<F> {
         TotalOrderIterator {
             prev_entry: match &self.last_sp_total_order {
                 None => None,
-                Some(prv) => Some(prv.clone_strong()),
+                Some(prv) => Some(prv.into()),
             },
             forward: false,
             m: &mut self.m,
@@ -445,7 +442,7 @@ impl<F: RWS> Log<F> {
         SpIterator {
             prev_entry: match &self.last_sp {
                 None => None,
-                Some(prv) => Some(prv.clone_strong()),
+                Some(prv) => Some(prv.into()),
             },
             m: &mut self.m,
             f: &mut self.f,
@@ -456,7 +453,7 @@ impl<F: RWS> Log<F> {
         TotalOrderIterator {
             prev_entry: match &self.last_op_total_order {
                 None => None,
-                Some(prv) => Some(prv.clone_strong()),
+                Some(prv) => Some(prv.into()),
             },
             forward: false,
             m: &mut self.m,
@@ -468,7 +465,7 @@ impl<F: RWS> Log<F> {
         TotalOrderIterator {
             prev_entry: match &self.first_op_to {
                 None => None,
-                Some((idx, _)) => Some(LogEntryWeak::from_file_idx(*idx).clone_strong()),
+                Some((idx, _)) => Some(LogEntryStrong::from_file_idx(*idx)),
             },
             forward: true,
             m: &mut self.m,
