@@ -1,6 +1,8 @@
 use crate::{errors::EncodeError, errors::LogIOError, verification::VerifyError};
 use std::{error::Error, fmt::Display, result};
 
+use super::op::EntryInfo;
+
 pub type Result<T> = result::Result<T, LogError>;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -35,6 +37,7 @@ pub enum LogError {
     SpPrevIdDifferent,
     SpInvalidInitHash,
     SpArrivedEarly,
+    SpSkippedOps(Vec<EntryInfo>),
 }
 
 impl LogError {

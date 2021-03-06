@@ -44,6 +44,30 @@ pub struct EntryInfo {
     pub hash: Hash, // hash of the data of the event
 }
 
+impl From<EntryInfoData> for EntryInfo {
+    fn from(ei: EntryInfoData) -> Self {
+        ei.info
+    }
+}
+
+impl From<OpEntryInfo> for EntryInfo {
+    fn from(op: OpEntryInfo) -> Self {
+        EntryInfo {
+            basic: op.op.info,
+            hash: op.hash,
+        }
+    }
+}
+
+impl From<&OpEntryInfo> for EntryInfo {
+    fn from(op: &OpEntryInfo) -> Self {
+        EntryInfo {
+            basic: op.op.info,
+            hash: op.hash,
+        }
+    }
+}
+
 impl Default for EntryInfo {
     fn default() -> Self {
         EntryInfo {
@@ -54,9 +78,13 @@ impl Default for EntryInfo {
 }
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct OpEntryInfo {
-    pub op: EntryInfoData,
+    pub op: Op,
+    pub hash: Hash,
     pub log_index: LogIdx,
 }
+
+/// EntryInfoData is used in Sp.additional_ops to give details about ops that the Sp includes, possibily with some
+/// additional information stored in the data field.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct EntryInfoData {
     pub info: EntryInfo,
@@ -98,13 +126,6 @@ impl OpState {
         }
     }
 
-    pub fn get_entry_info_data(&self) -> EntryInfoData {
-        EntryInfoData {
-            info: self.get_entry_info(),
-            data: self.op.data.clone(), // TODO should make ref cell?
-        }
-    }
-
     pub fn is_in_list(&self, list: &[EntryInfo]) -> bool {
         list.binary_search(&self.get_entry_info()).is_ok()
     }
@@ -137,7 +158,7 @@ impl PartialEq for OpState {
 #[derive(Clone, Ord, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Op {
     pub info: BasicInfo,
-    data: OpData,
+    pub data: OpData,
 }
 
 impl Op {

@@ -47,6 +47,13 @@ impl SpState {
         SpState::from_sp(sp, o)
     }
 
+    pub fn from_bytes<O: Options>(b: &[u8], o: O) -> Result<SpState> {
+        let sp = o
+            .deserialize(b)
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))?;
+        Ok(SpState { sp, hash: hash(b) })
+    }
+
     pub fn from_sp<O: Options>(sp: Sp, o: O) -> Result<SpState> {
         let enc = o
             .serialize(&sp)
@@ -62,6 +69,12 @@ impl SpState {
             basic: self.sp.info,
             hash: self.hash,
         }
+    }
+}
+
+impl From<SpState> for EntryInfo {
+    fn from(sp: SpState) -> Self {
+        sp.get_entry_info()
     }
 }
 
@@ -101,16 +114,18 @@ pub struct Sp {
     pub info: BasicInfo,
     pub new_ops_supported: SupportCount, // number of new operations supported by this sp
     pub support_hash: Hash,
-    // data: OpData,
     pub supported_sp_info: EntryInfo, // the sp that this one comes after
-    // pub unsupported_ops: Vec<EntryInfo>, // operations before this entry in the log not supported by this item
-    pub additional_ops: Vec<EntryInfoData>, // operations smaller than the time, but included
-                                            // verify: Verify,
+    pub additional_ops: Vec<EntryInfoData>, // all of these ops must be included in the SP, for example those that have smaller
+                                            // time, or those that the SP wants to add some additional details about
 }
 
 impl Display for Sp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "(id: {}, time: {})", self.info.id, self.info.time)
+        write!(
+            f,
+            "(id: {}, time: {}, support count: {}, prev sp: {:?})",
+            self.info.id, self.info.time, self.new_ops_supported, self.supported_sp_info.basic
+        )
     }
 }
 

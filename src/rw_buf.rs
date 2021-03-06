@@ -1446,7 +1446,7 @@ mod test {
         assert_eq!(0, rw.read(&mut []).unwrap());
         // read into a buf with enough room
         assert_eq!(10, rw.read(&mut buf).unwrap());
-        assert_eq!(v_orign, buf[..v_orign.len()]);
+        assert_eq!(v_orign, &buf[..v_orign.len()]);
         // we should read no bytes
         assert_eq!(0, rw.read(&mut buf).unwrap());
         // read half at a time
@@ -1628,7 +1628,7 @@ mod test {
         rw.seek_relative(-5).unwrap();
         let mut buf = vec![0; 3];
         rw.read_exact(&mut buf).unwrap();
-        assert_eq!(v_clone[5..8], buf);
+        assert_eq!(&v_clone[5..8], buf);
         let v = gen_rand(10, &mut rng);
         assert_eq!(10, rw.write(&v).unwrap());
         rw.seek_relative(-18).unwrap();

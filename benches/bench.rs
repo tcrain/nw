@@ -2,10 +2,10 @@ use std::fs::File;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use nw::{
-    causal::causal_log::{
+    file_sr::{CursorSR, FileSR},
+    log::ordered_log::{
         DepBTree, DepHSet, DepVec, Dependents, SupBTree, SupHSet, SupVec, Supporters,
     },
-    file_sr::{CursorSR, FileSR},
     log::{local_log::test_setup::LogTest, LogIdx},
     rw_buf::RWBuf,
     verification::Id,

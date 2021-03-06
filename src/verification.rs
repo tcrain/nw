@@ -1,7 +1,7 @@
 // use ed25519_dalek::Signature;
 use std::{
     error::Error,
-    fmt::Display,
+    fmt::{Debug, Display},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -26,8 +26,14 @@ impl Display for VerifyError {
     }
 }
 
-#[derive(Clone, Copy, Hash, Ord, Eq, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Hash, Ord, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Blake3Hash([u8; blake3::OUT_LEN]);
+
+impl Debug for Blake3Hash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", &self.0[..4])
+    }
+}
 
 impl Blake3Hash {
     pub fn as_bytes(&self) -> &[u8] {

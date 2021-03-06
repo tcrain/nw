@@ -162,8 +162,8 @@ impl LogItems {
     ) -> StrongPtrIdx {
         let prv = match self {
             LogItems::Empty => None,
-            LogItems::Single(si) => Some(si.entry.to_log_entry_strong()), // Rc::clone(&si.entry)),
-            LogItems::Multiple(mi) => Some(mi.last_entry.to_log_entry_strong()), //::clone(&mi.last_entry))
+            LogItems::Single(si) => Some((&si.entry).into()), // Rc::clone(&si.entry)),
+            LogItems::Multiple(mi) => Some((&mi.last_entry).into()), //::clone(&mi.last_entry))
         };
         let log_entry = LogEntry {
             log_index: idx,
@@ -282,6 +282,7 @@ impl<F: RWS> Log<F> {
                 .unwrap(),
             last_op: None,
             not_included_ops: vec![],
+            late_included: vec![],
             prev_sp: None,
             supported_sp_log_index: None,
         };
@@ -290,7 +291,7 @@ impl<F: RWS> Log<F> {
             .insert_outer_sp(init_sp)
             .expect("failed inserting the initial SP");
         // l.m.insert(0, Rc::clone(&outer_sp.ptr));
-        l.init_sp = Some(outer_sp.to_log_entry_weak());
+        l.init_sp = Some((&outer_sp).into());
         l
     }
 
@@ -482,7 +483,7 @@ impl<F: RWS> Log<F> {
     pub fn check_sp<T>(
         &mut self,
         sp: Sp,
-        included: &[EntryInfo],
+        late_included: &[EntryInfo],
         not_included: &[EntryInfo],
         ti: &T,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)>
@@ -500,7 +501,7 @@ impl<F: RWS> Log<F> {
         sp_ptr.entry.as_sp().check_sp_log_order(
             prev_sp_log_idx,
             sp_state,
-            included.iter().cloned(),
+            late_included.iter().cloned(),
             not_included.iter().cloned(),
             &mut self.m,
             &mut self.f,
@@ -516,11 +517,15 @@ impl<F: RWS> Log<F> {
         let sp = sp_ptr.entry.as_sp();
         let prev_sp_info = sp.sp.sp.supported_sp_info;
         let prev_sp = self
-            .find_sp_from(prev_sp_info, None, sp_ref.to_log_entry_strong())
+            .find_sp_from(prev_sp_info, None, (&sp_ref).into())
             .expect("should be able to find prev Sp for Sp already decided");
         let prev_sp_ptr = prev_sp.ptr.borrow();
         let not_included = sp
             .not_included_ops
+            .iter()
+            .map(|sp| sp.get_ptr().borrow().entry.get_entry_info());
+        let late_included = sp
+            .late_included
             .iter()
             .map(|sp| sp.get_ptr().borrow().entry.get_entry_info());
         let ret = prev_sp_ptr
@@ -529,7 +534,7 @@ impl<F: RWS> Log<F> {
             .check_sp_log_order(
                 prev_sp_ptr.log_index,
                 sp.sp.clone(),
-                [].iter().cloned(), // TODO
+                late_included,
                 not_included,
                 &mut self.m,
                 &mut self.f,
@@ -538,14 +543,15 @@ impl<F: RWS> Log<F> {
         Ok(ret)
     }
 
-    pub fn check_sp_exact<T>(
+    pub fn check_sp_exact<T, I>(
         &mut self,
         sp: Sp,
-        exact: &[EntryInfo],
+        exact: I,
         ti: &T,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)>
     where
         T: TimeInfo,
+        I: Iterator<Item = EntryInfo>,
     {
         sp.validate(&self.init_sp_entry_info.hash, ti)?;
         let sp_supported_info = sp.supported_sp_info;
@@ -600,7 +606,7 @@ impl<F: RWS> Log<F> {
 
         // update the last sp total order pointer if necessary
         self.last_sp_total_order = match self.last_sp_total_order.take() {
-            None => Some(new_sp_ref.to_log_entry_weak()),
+            None => Some((&new_sp_ref).into()),
             Some(last) => {
                 if last
                     .get_ptr(&mut self.m, &mut self.f)
@@ -610,7 +616,7 @@ impl<F: RWS> Log<F> {
                     .sp
                     < new_sp_ref.ptr.borrow().entry.as_sp().sp
                 {
-                    Some(new_sp_ref.to_log_entry_weak())
+                    Some((&new_sp_ref).into())
                 } else {
                     Some(last)
                 }
@@ -625,7 +631,7 @@ impl<F: RWS> Log<F> {
         if let Some(last_sp) = last_sp_op {
             set_next_sp(&last_sp, None, &new_sp_ref);
         }
-        self.last_sp = Some(new_sp_ref.to_log_entry_weak());
+        self.last_sp = Some((&new_sp_ref).into());
         // insert into the log file
         new_sp_ref
             .ptr
@@ -702,7 +708,7 @@ impl<F: RWS> Log<F> {
 
         // update the last op pointer if necessary
         self.last_op_total_order = match self.last_op_total_order.take() {
-            None => Some(new_op_ref.to_log_entry_weak()),
+            None => Some((&new_op_ref).into()),
             Some(last) => {
                 if last
                     .get_ptr(&mut self.m, &mut self.f)
@@ -712,7 +718,7 @@ impl<F: RWS> Log<F> {
                     .op
                     < new_op_ref.ptr.borrow().entry.as_op().op
                 {
-                    Some(new_op_ref.to_log_entry_weak())
+                    Some((&new_op_ref).into())
                 } else {
                     Some(last)
                 }
@@ -771,7 +777,19 @@ pub mod test_fns {
                 if entry == l.get_initial_entry_info() {
                     assert_eq!(Err(LogError::IsInitSP), res);
                 } else {
-                    res.expect("unable to get sp exact");
+                    let (outer_sp, exact_op) = res.expect("unable to get sp exact");
+                    // try to insert by exact
+                    let sp_supported_info = outer_sp.sp.sp.supported_sp_info;
+                    let sp_state = outer_sp.sp;
+                    let exact = exact_op.into_iter().map(|op| op.into());
+                    let sp_ref = l.find_sp(sp_supported_info, None).unwrap().ptr;
+                    let sp_ptr = sp_ref.borrow();
+                    let prev_sp_log_index = sp_ptr.log_index;
+                    sp_ptr
+                        .entry
+                        .as_sp()
+                        .check_sp_exact(prev_sp_log_index, sp_state, exact, &mut l.m, &mut l.f)
+                        .unwrap();
                 }
             }
             assert_eq!(
@@ -999,12 +1017,8 @@ pub(crate) mod tests {
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert!(iter.next().is_none());
-            let mut iter = total_order_iterator(
-                Some(&first_entry.to_log_entry_strong()),
-                true,
-                &mut l.m,
-                &mut l.f,
-            );
+            let mut iter =
+                total_order_iterator(Some(&(&first_entry).into()), true, &mut l.m, &mut l.f);
             assert_eq!(
                 op1_clone,
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
@@ -1256,6 +1270,7 @@ pub(crate) mod tests {
         OuterSp {
             sp,
             not_included_ops: vec![],
+            late_included: vec![],
             prev_sp: None, /*Some(LogEntryWeak::from_file_idx(
                                prev_sp.as_ref().borrow().file_index,
                            )),*/
@@ -1446,7 +1461,7 @@ pub(crate) mod tests {
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
         for (ifo, hsh) in sp1_ops.iter().zip(m_clone) {
-            assert_eq!(hsh, ifo.op.info.hash);
+            assert_eq!(hsh, ifo.hash);
         }
 
         // make an sp with the other items
@@ -1463,7 +1478,7 @@ pub(crate) mod tests {
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp2_ops.iter().zip(not_included.iter()) {
-            assert_eq!(op, &ifo.op.info);
+            assert_eq!(op, &EntryInfo::from(ifo.clone()));
         }
         // check the sp prev pointers
         check_sp_prev(&mut l, true);
@@ -1523,7 +1538,7 @@ pub(crate) mod tests {
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp1_ops.iter().zip([op1].iter()) {
-            assert_eq!(&op.get_entry_info_data(), &ifo.op);
+            assert_eq!(op.op, ifo.op);
         }
 
         let sp2 = Sp::new(
@@ -1534,12 +1549,14 @@ pub(crate) mod tests {
             sp1_info,
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let (outer_sp2, sp2_ops) = l.check_sp_exact(sp2, &[op2.get_entry_info()], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l
+            .check_sp_exact(sp2, [op2.get_entry_info()].iter().cloned(), &ti)
+            .unwrap();
         assert_eq!(0, outer_sp2.not_included_ops.len());
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp2_ops.iter().zip([op2].iter()) {
-            assert_eq!(&op.get_entry_info_data(), &ifo.op);
+            assert_eq!(ifo.op, op.op);
         }
         // check the sp prev pointers
         check_sp_prev(&mut l, true);

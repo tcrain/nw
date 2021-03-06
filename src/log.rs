@@ -5,7 +5,7 @@ pub mod local_log;
 pub(crate) mod log_error;
 pub(crate) mod log_file;
 pub(crate) mod op;
-pub(crate) mod ordered_log;
+pub mod ordered_log;
 pub(crate) mod sp;
 
 pub type LogIdx = u64;

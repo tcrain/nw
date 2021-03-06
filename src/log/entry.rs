@@ -65,8 +65,10 @@ impl LogEntry {
     }
 
     pub fn get_op_entry_info(&self) -> OpEntryInfo {
+        let op = self.entry.as_op();
         OpEntryInfo {
-            op: self.entry.as_op().op.get_entry_info_data(),
+            op: op.op.op.clone(),
+            hash: op.op.hash,
             log_index: self.log_index,
         }
     }
@@ -369,11 +371,11 @@ pub fn set_next_total_order<F: RWS>(
         None => (),
         Some(nxt) => {
             new_next.ptr.borrow_mut().to_pointers.next_to = Some(nxt.clone_weak());
-            nxt.get_ptr(m, f).borrow_mut().to_pointers.prev_to = Some(new_next.to_log_entry_weak());
+            nxt.get_ptr(m, f).borrow_mut().to_pointers.prev_to = Some(new_next.into());
         }
     };
-    new_next.ptr.borrow_mut().to_pointers.prev_to = Some(prev.to_log_entry_weak());
-    prev.ptr.borrow_mut().to_pointers.next_to = Some(new_next.to_log_entry_weak());
+    new_next.ptr.borrow_mut().to_pointers.prev_to = Some(prev.into());
+    prev.ptr.borrow_mut().to_pointers.next_to = Some(new_next.into());
 }
 
 // Removes an item from the total order list
@@ -431,27 +433,6 @@ impl StrongPtrIdx {
     pub fn new(file_idx: u64, ptr: StrongPtr) -> StrongPtrIdx {
         StrongPtrIdx { file_idx, ptr }
     }
-
-    fn to_log_entry_keep(&self) -> LogEntryKeep {
-        LogEntryKeep {
-            file_idx: self.file_idx,
-            ptr: Some(Rc::clone(&self.ptr)),
-        }
-    }
-
-    pub fn to_log_entry_weak(&self) -> LogEntryWeak {
-        LogEntryWeak {
-            file_idx: self.file_idx,
-            ptr: Rc::downgrade(&self.ptr),
-        }
-    }
-
-    pub fn to_log_entry_strong(&self) -> LogEntryStrong {
-        LogEntryStrong {
-            file_idx: self.file_idx,
-            ptr: Some(Rc::clone(&self.ptr)),
-        }
-    }
 }
 
 // Like LogEntryStrong, but ptr must always have a value
@@ -471,24 +452,28 @@ impl LogEntryKeep {
         self.ptr = Some(get_ptr(self.file_idx, m, f))
     }
 
-    fn to_log_entry_strong(&self) -> LogEntryStrong {
-        LogEntryStrong {
-            file_idx: self.file_idx,
-            ptr: self.ptr.as_ref().map(|ptr| Rc::clone(ptr)),
-        }
-    }
-
-    fn to_log_entry_weak(&self) -> LogEntryWeak {
-        LogEntryWeak {
-            file_idx: self.file_idx,
-            ptr: Rc::downgrade(&self.get_ptr()),
-        }
-    }
-
     pub fn new(file_idx: u64, ptr: StrongPtr) -> LogEntryKeep {
         LogEntryKeep {
             file_idx,
             ptr: Some(ptr),
+        }
+    }
+}
+
+impl From<&StrongPtrIdx> for LogEntryKeep {
+    fn from(le: &StrongPtrIdx) -> Self {
+        LogEntryKeep {
+            file_idx: le.file_idx,
+            ptr: Some(Rc::clone(&le.ptr)),
+        }
+    }
+}
+
+impl From<StrongPtrIdx> for LogEntryKeep {
+    fn from(le: StrongPtrIdx) -> Self {
+        LogEntryKeep {
+            file_idx: le.file_idx,
+            ptr: Some(le.ptr),
         }
     }
 }
@@ -515,6 +500,33 @@ pub struct LogEntryStrong {
     pub file_idx: u64,
     #[serde(skip)]
     ptr: Option<StrongPtr>,
+}
+
+impl From<&StrongPtrIdx> for LogEntryStrong {
+    fn from(le: &StrongPtrIdx) -> Self {
+        LogEntryStrong {
+            file_idx: le.file_idx,
+            ptr: Some(Rc::clone(&le.ptr)),
+        }
+    }
+}
+
+impl From<StrongPtrIdx> for LogEntryStrong {
+    fn from(le: StrongPtrIdx) -> Self {
+        LogEntryStrong {
+            file_idx: le.file_idx,
+            ptr: Some(le.ptr),
+        }
+    }
+}
+
+impl From<LogEntryKeep> for LogEntryStrong {
+    fn from(le: LogEntryKeep) -> Self {
+        LogEntryStrong {
+            file_idx: le.file_idx,
+            ptr: le.ptr,
+        }
+    }
 }
 
 impl Eq for LogEntryStrong {}
@@ -660,6 +672,24 @@ pub struct LogEntryWeak {
     file_idx: u64,
     #[serde(skip)]
     ptr: WeakPtr,
+}
+
+impl From<&StrongPtrIdx> for LogEntryWeak {
+    fn from(le: &StrongPtrIdx) -> Self {
+        LogEntryWeak {
+            file_idx: le.file_idx,
+            ptr: Rc::downgrade(&le.ptr),
+        }
+    }
+}
+
+impl From<&LogEntryKeep> for LogEntryWeak {
+    fn from(le: &LogEntryKeep) -> Self {
+        LogEntryWeak {
+            file_idx: le.file_idx,
+            ptr: Rc::downgrade(le.get_ptr()),
+        }
+    }
 }
 
 impl Display for LogEntryWeak {
@@ -902,10 +932,10 @@ pub fn drop_entry(entry: &StrongPtrIdx) -> Result<StrongPtr> {
 pub struct OuterOp {
     pub log_index: u64,
     pub op: OpState,
-    pub include_in_hash: bool,
-    pub arrived_late: bool,
-    // hash: Hash,
-    // verification: Verify,
+    pub include_in_hash: bool, // if false op was soo late that it will not be included in the SP
+    pub arrived_late: bool, // if true, op was late, but not late enough to not be included, so it will be specially marked as included in the Sp
+                            // hash: Hash,
+                            // verification: Verify,
 }
 
 impl OuterOp {}
@@ -949,6 +979,7 @@ pub struct OuterSp {
     pub supported_sp_log_index: Option<LogIdx>, // the log index of the sp that this entry supports
     pub last_op: Option<LogEntryWeak>,          // the last op in the total order this sp supported
     pub not_included_ops: Vec<LogEntryKeep>, // the ops before last_op in the log that are not included in the sp
+    pub late_included: Vec<LogEntryKeep>,    // the ops were late, but were still included
     pub prev_sp: Option<LogEntryWeak>,       // the previous sp in the total order in the log
 }
 
@@ -958,20 +989,21 @@ pub fn set_next_sp(
     old_next_sp: Option<&StrongPtrIdx>,
     new_next: &StrongPtrIdx,
 ) {
-    new_next.ptr.borrow_mut().entry.mut_as_sp().prev_sp = Some(prev_sp.to_log_entry_weak()); //Some(Rc::downgrade(prev_sp));
+    new_next.ptr.borrow_mut().entry.mut_as_sp().prev_sp = Some(prev_sp.into()); //Some(Rc::downgrade(prev_sp));
     match old_next_sp {
         None => (),
         Some(old_next) => {
-            old_next.ptr.borrow_mut().entry.mut_as_sp().prev_sp =
-                Some(new_next.to_log_entry_weak()); // Some(Rc::downgrade(new_next))
+            old_next.ptr.borrow_mut().entry.mut_as_sp().prev_sp = Some(new_next.into());
+            // Some(Rc::downgrade(new_next))
         }
     }
 }
 
 pub struct SpResult {
-    included: Vec<OpEntryInfo>,
-    not_included: Vec<LogEntryKeep>,
-    last_op: Option<LogEntryWeak>,
+    included: Vec<OpEntryInfo>,       // all ops that were included
+    late_included: Vec<LogEntryKeep>, // ops that were late, but were still included
+    not_included: Vec<LogEntryKeep>,  // ops that were on time, but were not included
+    last_op: Option<LogEntryWeak>,    // op with largest time
 }
 
 impl OuterSp {
@@ -994,11 +1026,11 @@ impl OuterSp {
         Ok(Box::new(iter))
     }
 
-    pub fn check_sp_exact<F: RWS>(
+    pub fn check_sp_exact<F: RWS, I: Iterator<Item = EntryInfo>>(
         &self,
         my_log_idx: LogIdx,
         new_sp: SpState,
-        exact: &[EntryInfo],
+        exact: I,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
@@ -1008,7 +1040,7 @@ impl OuterSp {
         let op_iter = total_order_exact_iterator(
             not_included_iter,
             log_iter,
-            exact.iter().cloned(),
+            exact,
             new_sp.sp.additional_ops.iter().cloned(),
         );
         let sp_result = self.perform_check_sp(&new_sp.sp, op_iter)?;
@@ -1017,6 +1049,7 @@ impl OuterSp {
                 sp: new_sp,
                 last_op: sp_result.last_op,
                 not_included_ops: sp_result.not_included,
+                late_included: sp_result.late_included,
                 prev_sp: None,
                 supported_sp_log_index: Some(my_log_idx),
             },
@@ -1032,7 +1065,7 @@ impl OuterSp {
         &self,
         my_log_idx: LogIdx,
         new_sp: SpState,
-        included: J,
+        late_included: J,
         not_included: K,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
@@ -1045,7 +1078,7 @@ impl OuterSp {
         let op_iter = total_order_check_iterator(
             not_included_iter,
             log_iter,
-            included,
+            late_included,
             not_included,
             new_sp.sp.additional_ops.iter().cloned(),
         );
@@ -1055,6 +1088,7 @@ impl OuterSp {
                 sp: new_sp,
                 last_op: sp_result.last_op,
                 not_included_ops: sp_result.not_included,
+                late_included: sp_result.late_included,
                 prev_sp: None,
                 supported_sp_log_index: Some(my_log_idx),
             },
@@ -1106,6 +1140,8 @@ impl OuterSp {
         let mut not_included = vec![];
         let mut last_op = None;
         let mut included = vec![];
+        let mut skipped = vec![];
+        let mut late_included = vec![];
         let count = result_to_val(op_iter.try_fold(0, |mut count, (supported, nxt_op)| {
             if count >= new_sp.new_ops_supported {
                 // see if we already computed enough ops
@@ -1122,26 +1158,36 @@ impl OuterSp {
             match supported {
                 Supported::Supported => (),        // normal op
                 Supported::SupportedData(_) => (), // TODO should do something with this data?
+                Supported::Skipped(s) => {
+                    skipped.push(s);
+                    return Ok(count);
+                }
                 Supported::NotSupported => {
-                    not_included.push(nxt_op.to_log_entry_keep()); // Rc::downgrade(&nxt_op));
+                    not_included.push((&nxt_op).into()); // Rc::downgrade(&nxt_op));
                     return Ok(count);
                 }
             }
             let nxt_op_ptr = nxt_op.ptr.borrow();
             let nxt_op_op = nxt_op_ptr.entry.as_op();
             included.push(nxt_op_ptr.get_op_entry_info());
+            if nxt_op_op.arrived_late {
+                late_included.push((&nxt_op).into());
+            }
             // add the hash of the op
             hasher.update(nxt_op_op.op.hash.as_bytes());
             count += 1;
             // update the last op pointer
-            last_op = Some(nxt_op.to_log_entry_weak()); // Rc::downgrade(&nxt_op));
+            last_op = Some((&nxt_op).into()); // Rc::downgrade(&nxt_op));
             Ok(count)
         }));
-        if count != new_sp.new_ops_supported {
+        if !skipped.is_empty() {
+            Err(LogError::SpSkippedOps(skipped))
+        } else if count != new_sp.new_ops_supported {
             Err(LogError::NotEnoughOpsForSP)
         } else if new_sp.support_hash == hasher.finalize() {
             Ok(SpResult {
                 included,
+                late_included,
                 not_included,
                 last_op,
             })
@@ -1241,12 +1287,7 @@ pub fn total_order_after_all_iterator<'a, F>(
     f: &'a mut LogFile<F>,
 ) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
-        iter: total_order_iterator(
-            start.map(|entry| entry.to_log_entry_strong()).as_ref(),
-            true,
-            m,
-            f,
-        ),
+        iter: total_order_iterator(start.map(|entry| entry.into()).as_ref(), true, m, f),
         min_index: 0,
     }
 }
@@ -1257,12 +1298,7 @@ pub fn total_order_after_iterator<'a, F>(
     f: &'a mut LogFile<F>,
 ) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
-        iter: total_order_iterator(
-            start.map(|entry| entry.to_log_entry_strong()).as_ref(),
-            true,
-            m,
-            f,
-        ),
+        iter: total_order_iterator(start.map(|entry| entry.into()).as_ref(), true, m, f),
         min_index: start.map_or(0, |entry| entry.ptr.borrow().log_index),
     }
 }
@@ -1271,6 +1307,7 @@ pub enum Supported {
     Supported,
     SupportedData(EntryInfoData),
     NotSupported,
+    Skipped(EntryInfo),
 }
 
 // total order iterator that only includes log entries with a larger (or equal) log index than the input,
@@ -1281,8 +1318,8 @@ where
     K: Iterator<Item = EntryInfoData>,
 {
     iter: Box<dyn Iterator<Item = StrongPtrIdx> + 'a>,
-    extra_info_check: ExtraInfoCheck<K>,
-    exact_check: IncludedCheck<J>,
+    extra_info_check: ExactCheck<K, EntryInfoData>,
+    exact_check: ExactCheck<J, EntryInfo>,
 }
 
 pub fn total_order_exact_iterator<'a, J, K, I, F: RWS>(
@@ -1302,11 +1339,11 @@ where
     }));
     TotalOrderExactIterator {
         iter,
-        extra_info_check: ExtraInfoCheck {
-            last_extra_info: None,
-            extra_info,
+        extra_info_check: ExactCheck {
+            last_included: None,
+            included: extra_info,
         },
-        exact_check: IncludedCheck {
+        exact_check: ExactCheck {
             last_included: None,
             included: exact,
         },
@@ -1322,35 +1359,46 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(nxt) = self.iter.next() {
+            println!("nxt exact check {:?}", nxt.ptr.borrow().entry.as_op().op);
             let info = nxt.ptr.borrow().entry.get_entry_info();
             // first check if the op is supported by an extra info field
-            if let Some(extra_info) = self.extra_info_check.check_extra_info(info) {
-                return Some((Supported::SupportedData(extra_info), nxt));
+            match self.extra_info_check.check_exact(info) {
+                ExactCheckResult::NotFound => (), // nothing to do
+                ExactCheckResult::Found(extra_info) => {
+                    return Some((Supported::SupportedData(extra_info), nxt))
+                }
+                ExactCheckResult::Skipped(skipped) => {
+                    return Some((Supported::Skipped(skipped.into()), nxt));
+                }
             }
             // next check if the op is supported as part of the exact list
-            if self.exact_check.check_supported(info) {
-                return Some((Supported::Supported, nxt));
+            match self.exact_check.check_exact(info) {
+                ExactCheckResult::NotFound => return Some((Supported::NotSupported, nxt)),
+                ExactCheckResult::Found(_) => return Some((Supported::Supported, nxt)),
+                ExactCheckResult::Skipped(skipped) => {
+                    return Some((Supported::Skipped(skipped), nxt));
+                }
             }
-            // oterwise it is not included
-            return Some((Supported::NotSupported, nxt));
-        };
+        }
         None
     }
 }
 
-struct IncludedCheck<J>
+struct IncludedCheck<J, K>
 where
-    J: Iterator<Item = EntryInfo>,
+    J: Iterator<Item = K>,
+    K: Clone + Sized + Ord,
 {
-    last_included: Option<EntryInfo>,
+    last_included: Option<K>,
     included: J,
 }
 
-impl<J> IncludedCheck<J>
+impl<J, K> IncludedCheck<J, K>
 where
-    J: Iterator<Item = EntryInfo>,
+    J: Iterator<Item = K>,
+    K: Clone + Sized + Ord,
 {
-    fn check_supported(&mut self, entry: EntryInfo) -> bool {
+    fn check_supported(&mut self, entry: K) -> bool {
         let mut found = false;
         if let Some(last_supported) = self.last_included.as_ref() {
             if last_supported >= &entry {
@@ -1366,6 +1414,69 @@ where
             return last_support == &entry;
         }
         false
+    }
+}
+
+/// Used when iterating through the log in total order, checking if for entries in self.included.
+/// While also letting the caller know if any entires in self.included have been skipped,
+/// self.included must be in increasing order.
+struct ExactCheck<J, K>
+where
+    J: Iterator<Item = K>,
+{
+    last_included: Option<K>,
+    included: J,
+    // phantom: PhantomData<L>,
+}
+
+struct Tmp<J: Iterator<Item = EntryInfo>> {
+    a: ExactCheck<J, EntryInfo>,
+}
+
+impl<J: Iterator<Item = EntryInfo>> Tmp<J> {
+    fn tmp(&mut self, e: EntryInfo) {
+        self.a.check_exact(e);
+    }
+}
+
+enum ExactCheckResult<K> {
+    NotFound,
+    Found(K),
+    Skipped(K),
+}
+
+/// Checks for the entry while iterating though self.included.
+/// If the input entry is larger than the next entry in self.included, then that that value is returned
+/// in ExactCheckResult::Skipped.
+/// Expects to be called with entires in increasing order.
+impl<J, K> ExactCheck<J, K>
+where
+    J: Iterator<Item = K>,
+    K: Clone + Debug,
+{
+    fn check_exact<L: Ord + From<K> + Debug>(&mut self, entry: L) -> ExactCheckResult<K> {
+        if self.last_included.is_none() {
+            self.last_included = self.included.next();
+        }
+        match self.last_included.as_ref() {
+            Some(last_supported) => {
+                let conv: L = last_supported.clone().into();
+                match conv.cmp(&entry) {
+                    std::cmp::Ordering::Greater => ExactCheckResult::NotFound,
+                    std::cmp::Ordering::Equal => {
+                        let ret = ExactCheckResult::Found(last_supported.clone());
+                        self.last_included = None;
+                        ret
+                    }
+                    std::cmp::Ordering::Less => {
+                        let ret = ExactCheckResult::Skipped(last_supported.clone());
+                        self.last_included = None;
+                        ret
+                    }
+                }
+            }
+            None => ExactCheckResult::NotFound,
+        }
     }
 }
 
@@ -1412,9 +1523,9 @@ where
     K: Iterator<Item = EntryInfoData>,
 {
     iter: Box<dyn Iterator<Item = StrongPtrIdx> + 'a>,
-    extra_info_check: ExtraInfoCheck<K>,
-    included_check: IncludedCheck<J>,
-    not_included_check: IncludedCheck<L>,
+    extra_info_check: ExactCheck<K, EntryInfoData>,
+    included_check: IncludedCheck<J, EntryInfo>,
+    not_included_check: IncludedCheck<L, EntryInfo>,
 }
 
 //fn entry_less_than(x: &LogEntryStrong, y: &LogEntryStrong) -> bool {
@@ -1440,9 +1551,9 @@ where
     }));
     TotalOrderCheckIterator {
         iter,
-        extra_info_check: ExtraInfoCheck {
-            last_extra_info: None,
-            extra_info,
+        extra_info_check: ExactCheck {
+            last_included: None,
+            included: extra_info,
         },
         included_check: IncludedCheck {
             last_included: None,
@@ -1467,8 +1578,14 @@ where
         if let Some(nxt) = self.iter.next() {
             let info = nxt.ptr.borrow().entry.get_entry_info();
             // first check if the op is supported by an extra info field
-            if let Some(extra_info) = self.extra_info_check.check_extra_info(info) {
-                return Some((Supported::SupportedData(extra_info), nxt));
+            match self.extra_info_check.check_exact(info) {
+                ExactCheckResult::NotFound => (), // nothing to do
+                ExactCheckResult::Found(extra_info) => {
+                    return Some((Supported::SupportedData(extra_info), nxt))
+                }
+                ExactCheckResult::Skipped(skipped) => {
+                    return Some((Supported::Skipped(skipped.into()), nxt));
+                }
             }
             // next check if the op is supported as part of the supported list
             if self.included_check.check_supported(info) {
@@ -1646,8 +1763,9 @@ mod tests {
         .unwrap();
         let outer_sp = OuterSp {
             sp: sp_state,
-            last_op: last_op.map(|op| op.to_log_entry_weak()),
+            last_op: last_op.map(|op| op.into()),
             not_included_ops,
+            late_included: vec![],
             prev_sp: None, // prev_sp.as_ref().map(|op| op.to_log_entry_weak()),
             supported_sp_log_index: prev_sp_log_index,
         };
