@@ -247,10 +247,6 @@ impl Display for PrevEntry {
     }
 }
 
-pub fn prev_entry_strong_to_weak(entry: Option<LogEntryStrong>) -> Option<LogEntryWeak> {
-    entry.map(|et| et.clone_weak())
-}
-
 impl PrevEntry {
     pub fn get_hash(&self) -> Hash {
         match self {
@@ -273,6 +269,7 @@ impl PrevEntry {
         }
     }
 
+    #[inline(always)]
     pub fn mut_as_op(&mut self) -> &mut OuterOp {
         match self {
             PrevEntry::Sp(_) => panic!("expected op"),
@@ -280,6 +277,7 @@ impl PrevEntry {
         }
     }
 
+    #[inline(always)]
     pub fn as_op(&self) -> &OuterOp {
         match self {
             PrevEntry::Sp(_) => panic!("expected op"),
@@ -287,6 +285,7 @@ impl PrevEntry {
         }
     }
 
+    #[inline(always)]
     pub fn mut_as_sp(&mut self) -> &mut OuterSp {
         match self {
             PrevEntry::Sp(sp) => sp,
@@ -294,6 +293,7 @@ impl PrevEntry {
         }
     }
 
+    #[inline(always)]
     pub fn as_sp(&self) -> &OuterSp {
         match self {
             PrevEntry::Sp(sp) => sp,
@@ -336,6 +336,7 @@ impl TotalOrderPointers {
         TotalOrderPointers { next_to, prev_to }
     }
 
+    #[inline(always)]
     pub fn get_prev_to<F: RWS>(
         &self,
         m: &mut HashItems<LogEntry>,
@@ -344,6 +345,7 @@ impl TotalOrderPointers {
         self.prev_to.as_ref().map(|entry| entry.get_ptr(m, f))
     }
 
+    #[inline(always)]
     pub fn get_next_to<F: RWS>(
         &self,
         m: &mut HashItems<LogEntry>,
@@ -352,10 +354,12 @@ impl TotalOrderPointers {
         self.next_to.as_ref().map(|entry| entry.get_ptr(m, f))
     }
 
+    #[inline(always)]
     pub fn get_prev_to_strong(&self) -> Option<LogEntryStrong> {
         self.prev_to.as_ref().map(|entry| entry.into())
     }
 
+    #[inline(always)]
     pub fn get_next_to_strong(&self) -> Option<LogEntryStrong> {
         self.next_to.as_ref().map(|entry| entry.into())
     }
@@ -495,7 +499,7 @@ impl PartialEq for LogEntryKeep {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct LogEntryStrong {
     pub file_idx: u64,
     #[serde(skip)]
@@ -628,23 +632,6 @@ impl LogEntryStrong {
         Rc::clone(self.ptr.as_ref().unwrap())
     }
 
-    pub fn clone_weak(&self) -> LogEntryWeak {
-        LogEntryWeak {
-            file_idx: self.file_idx,
-            ptr: match self.ptr.as_ref() {
-                None => Weak::default(),
-                Some(entry) => Rc::downgrade(entry),
-            },
-        }
-    }
-
-    pub fn clone_strong(&self) -> LogEntryStrong {
-        LogEntryStrong {
-            file_idx: self.file_idx,
-            ptr: self.ptr.as_ref().map(|entry| Rc::clone(entry)),
-        }
-    }
-
     // panics if the entry is not in memory
     pub fn clone_strong_expect_exists(&self) -> StrongPtrIdx {
         StrongPtrIdx {
@@ -688,6 +675,18 @@ pub struct LogEntryWeak {
     file_idx: u64,
     #[serde(skip)]
     ptr: WeakPtr,
+}
+
+impl From<LogEntryStrong> for LogEntryWeak {
+    fn from(le: LogEntryStrong) -> Self {
+        LogEntryWeak {
+            file_idx: le.file_idx,
+            ptr: match le.ptr.as_ref() {
+                None => Weak::default(),
+                Some(entry) => Rc::downgrade(entry),
+            },
+        }
+    }
 }
 
 impl From<&StrongPtrIdx> for LogEntryWeak {
@@ -865,7 +864,7 @@ impl LogPointers {
     }
 
     pub fn get_prev_strong(&self) -> Option<LogEntryStrong> {
-        self.prev_entry.as_ref().map(|entry| entry.clone_strong())
+        self.prev_entry.clone()
     }
 
     pub fn get_next<F: RWS>(
@@ -980,9 +979,13 @@ pub struct OuterSp {
     pub sp: SpState,
     pub supported_sp_log_index: Option<LogIdx>, // the log index of the sp that this entry supports
     pub last_op: Option<LogEntryWeak>,          // the last op in the total order this sp supported
-    pub not_included_ops: Vec<LogEntryKeep>, // the ops before last_op in the log that are not included in the sp
-    pub late_included: Vec<LogEntryKeep>,    // the ops were late, but were still included
-    pub prev_sp: Option<LogEntryWeak>,       // the previous sp in the total order in the log
+    // the ops before last_op in the log that are not included in the sp
+    // (by definintion each is op.include_in_hash = true, but op.arrived_late may be true or false)
+    // they include those not included from the previous Sps if they are still not included //TODO prevent this from getting too big
+    pub not_included_ops: Vec<LogEntryKeep>,
+    // the ops were late, but were still included (by definition each is op.arrived_late = true)
+    pub late_included: Vec<LogEntryKeep>,
+    pub prev_sp: Option<LogEntryWeak>, // the previous sp in the total order in the log
 }
 
 // sets the next Sp in the total ordering of the log.
@@ -1122,10 +1125,10 @@ impl OuterSp {
         // we only want operations after the last op of the previous sp in the log
         let log_iter = if self.sp.sp.is_init() {
             // for the inital SP, we always start from the first op, and include all ops
-            total_order_after_all_iterator(Some(&last_op), m, f)
+            total_order_after_all_iterator(&last_op, m, f)
         } else {
             // if prev sp is not the inital SP, then we need to move forward 1 op since last op was already included in prev sp
-            let mut log_iter = total_order_after_iterator(Some(&last_op), m, f);
+            let mut log_iter = total_order_after_iterator(&last_op, m, f);
             log_iter.next();
             log_iter
         };
@@ -1216,13 +1219,13 @@ impl Debug for OuterSp {
 }
 
 pub fn total_order_iterator<'a, F>(
-    start: Option<&LogEntryStrong>,
+    start: &LogEntryStrong,
     forward: bool,
     m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 ) -> TotalOrderIterator<'a, F> {
     TotalOrderIterator {
-        prev_entry: start.map(|op| op.clone_strong()),
+        prev_entry: Some(start.clone()),
         forward,
         m,
         f,
@@ -1291,25 +1294,27 @@ impl<'a, F: RWS> Iterator for TotalOrderAfterIterator<'a, F> {
     }
 }
 
+/// Returns an total order iterator that returns items larger than start.
 pub fn total_order_after_all_iterator<'a, F>(
-    start: Option<&StrongPtrIdx>,
+    start: &StrongPtrIdx,
     m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 ) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
-        iter: total_order_iterator(start.map(|entry| entry.into()).as_ref(), true, m, f),
+        iter: total_order_iterator(&start.into(), true, m, f),
         min_index: 0,
     }
 }
 
+/// Returns an total order iterator that returns items larger than start AND are after start in the log.
 pub fn total_order_after_iterator<'a, F>(
-    start: Option<&StrongPtrIdx>,
+    start: &StrongPtrIdx,
     m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
 ) -> TotalOrderAfterIterator<'a, F> {
     TotalOrderAfterIterator {
-        iter: total_order_iterator(start.map(|entry| entry.into()).as_ref(), true, m, f),
-        min_index: start.map_or(0, |entry| entry.ptr.borrow().log_index),
+        iter: total_order_iterator(&start.into(), true, m, f),
+        min_index: start.ptr.borrow().log_index,
     }
 }
 #[derive(Debug)]

@@ -193,7 +193,7 @@ impl LogItems {
                 si.entry
                     .ptr
                     .borrow_mut()
-                    .set_next(Some(new_entry_strong.clone_weak())); //::downgrade(&new_entry_ref)));
+                    .set_next(Some(new_entry_strong.into())); //::downgrade(&new_entry_ref)));
                 let first = si.entry.clone(); // ::clone(&si.entry);
                 *self = LogItems::Multiple(LogMultiple {
                     last_entry: new_entry_keep.clone(),
@@ -204,7 +204,7 @@ impl LogItems {
                 lm.last_entry
                     .ptr
                     .borrow_mut()
-                    .set_next(Some(new_entry_strong.clone_weak()));
+                    .set_next(Some(new_entry_strong.into()));
                 lm.last_entry = new_entry_keep.clone();
             }
         }
@@ -1014,8 +1014,7 @@ pub(crate) mod tests {
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert!(iter.next().is_none());
-            let mut iter =
-                total_order_iterator(Some(&(&first_entry).into()), true, &mut l.m, &mut l.f);
+            let mut iter = total_order_iterator(&(&first_entry).into(), true, &mut l.m, &mut l.f);
             assert_eq!(
                 op1_clone,
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
@@ -1031,7 +1030,7 @@ pub(crate) mod tests {
             assert!(iter.next().is_none());
 
             // check using the total order iterator, but only after the index in the log
-            let mut after_iter = total_order_after_iterator(Some(&first_entry), &mut l.m, &mut l.f);
+            let mut after_iter = total_order_after_iterator(&first_entry, &mut l.m, &mut l.f);
             assert_eq!(
                 op1_clone,
                 after_iter
