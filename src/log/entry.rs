@@ -1,11 +1,13 @@
 use core::panic;
 use std::{
     cell::RefCell,
+    cmp::Ordering,
     fmt::{self, Debug, Display, Formatter},
+    iter,
     rc::{Rc, Weak},
 };
 
-use crate::{rw_buf::RWS, utils::result_to_val, verification};
+use crate::{config::Time, rw_buf::RWS, utils::result_to_val, verification};
 use bincode::Options;
 use itertools::Itertools;
 use log::debug;
@@ -15,7 +17,7 @@ use super::{
     hash_items::HashItems,
     log_error::{LogError, Result},
     log_file::LogFile,
-    op::{EntryInfo, EntryInfoData, OpEntryInfo, OpState},
+    op::{min_entry, EntryInfo, EntryInfoData, OpEntryInfo, OpState},
     sp::{Sp, SpState},
     LogIdx,
 };
@@ -40,8 +42,8 @@ impl Display for LogEntry {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "log_index: {}, {}, {}",
-            self.log_index, self.log_pointers, self.to_pointers
+            "LogEntry => log_index: {}, file idx: {}, {}, {}, entry: {:?}",
+            self.log_index, self.file_index, self.log_pointers, self.to_pointers, self.entry
         )
     }
 }
@@ -62,6 +64,11 @@ impl LogEntry {
             PrevEntry::Sp(sp) => sp.finish_deserialize(m, f),
             PrevEntry::Op(_) => (),
         }
+    }
+
+    #[inline(always)]
+    pub fn get_time(&self) -> Time {
+        self.entry.get_entry_info().basic.time
     }
 
     pub fn get_op_entry_info(&self) -> OpEntryInfo {
@@ -248,6 +255,7 @@ impl Display for PrevEntry {
 }
 
 impl PrevEntry {
+    #[inline(always)]
     pub fn get_hash(&self) -> Hash {
         match self {
             PrevEntry::Sp(sp) => sp.sp.hash,
@@ -262,6 +270,7 @@ impl PrevEntry {
         }
     }
 
+    #[inline(always)]
     pub fn get_entry_info(&self) -> EntryInfo {
         match self {
             PrevEntry::Sp(sp) => sp.sp.get_entry_info(),
@@ -270,11 +279,26 @@ impl PrevEntry {
     }
 
     #[inline(always)]
+    pub fn get_time(&self) -> Time {
+        self.get_entry_info().basic.time
+    }
+
+    #[inline(always)]
     pub fn mut_as_op(&mut self) -> &mut OuterOp {
         match self {
             PrevEntry::Sp(_) => panic!("expected op"),
             PrevEntry::Op(op) => op,
         }
+    }
+
+    #[inline(always)]
+    pub fn is_op(&self) -> bool {
+        matches!(self, PrevEntry::Op(_))
+    }
+    #[inline(always)]
+
+    pub fn is_sp(&self) -> bool {
+        matches!(self, PrevEntry::Sp(_))
     }
 
     #[inline(always)]
@@ -929,7 +953,7 @@ pub fn drop_entry(entry: &StrongPtrIdx) -> Result<StrongPtr> {
     }*/
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct OuterOp {
     pub log_index: u64,
     pub op: OpState,
@@ -972,6 +996,18 @@ impl Display for OuterOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "Op(log_index: {}, op: {})", self.log_index, self.op.op)
     }
+}
+
+pub fn sort_by_entry(l: &StrongPtrIdx, r: &StrongPtrIdx) -> Ordering {
+    l.ptr
+        .borrow()
+        .entry
+        .get_entry_info()
+        .cmp(&r.ptr.borrow().entry.get_entry_info())
+}
+
+pub fn leq_by_entry(l: &StrongPtrIdx, r: &StrongPtrIdx) -> bool {
+    l.ptr.borrow().entry.get_entry_info() <= r.ptr.borrow().entry.get_entry_info()
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -1019,35 +1055,117 @@ impl OuterSp {
     }
 
     /// Returns an iterator that contains all operations that have not been included in this SP in the log.
+    /// Used when creating a new local Sp.
+    /// Starts from the last op of this iterator, and returns all ops after it in the log, or ops that were part of
+    /// this Sp's not_included items.
+    /// first_op is the first operation in the log in total order (this is used only if this is the first SP)
     pub fn get_ops_after_iter<'a, F: RWS>(
         &'a self,
+        late_include: Option<Vec<StrongPtrIdx>>,
+        first_op: Option<LogEntryWeak>,
         m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
     ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>> {
-        let (not_included_iter, log_iter) = self.get_iters(m, f)?;
-        let iter = not_included_iter.merge_by(log_iter, |x, y| {
+        let merge_fn = |x: &StrongPtrIdx, y: &StrongPtrIdx| {
             x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
-        });
-        Ok(Box::new(iter))
+        };
+        // not_included_iter are the items before self.last_op that were not included
+        // log_iter are the items that have larger time and are later in the log than self.last_op
+        // late_include are the items after self.last_op in the log that arrived late
+        let (not_included_iter, log_iter) = self.get_iters(first_op, m, f)?;
+        match late_include {
+            Some(late) => {
+                let iter = not_included_iter
+                    .merge_by(log_iter, merge_fn)
+                    .merge_by(late, merge_fn);
+                Ok(Box::new(iter))
+            }
+            None => {
+                let iter = not_included_iter.merge_by(log_iter, merge_fn);
+                Ok(Box::new(iter))
+            }
+        }
     }
 
-    pub fn check_sp_exact<F: RWS, I: Iterator<Item = EntryInfo>>(
+    /// This starts from last_op, going backwards in a total order, collecting the ops that match
+    /// that match those in exact or extra_info.
+    /// It returns an iterator of those ops in increasing sorted order.
+    fn get_early_ops<I, J, F: RWS>(
+        &self,
+        last_op: StrongPtrIdx,
+        exact: I,
+        extra_info: J,
+        m: &mut HashItems<LogEntry>,
+        f: &mut LogFile<F>,
+    ) -> impl Iterator<Item = StrongPtrIdx>
+    where
+        I: Iterator<Item = EntryInfo>,
+        J: Iterator<Item = EntryInfoData>,
+    {
+        let filter_fn = |(supported, op)| match supported {
+            Supported::Supported => Some(op),
+            Supported::SupportedData(_) => Some(op),
+            _ => None,
+        };
+        let mut exact = exact.peekable();
+        let mut extra_info = extra_info.peekable();
+        let late_min = min_entry(exact.peek(), extra_info.peek());
+        match late_min {
+            // there is nothing to iterate over, so just return an empty iterator
+            None => TotalOrderExactIterator::empty(exact, extra_info).filter_map(filter_fn),
+            Some(late_min) => {
+                // go backwards until late_min is reached collecting the items, sorting them
+                // and filtering only the ones that are part of exact or extra_info
+                let mut entries: Vec<_> = total_order_iterator(&last_op.into(), false, m, f)
+                    .take_while(|nxt| {
+                        let nxt_entry = nxt.ptr.borrow().entry.get_entry_info();
+                        println!("going back nxt time {:?} min {:?}", nxt_entry, late_min);
+                        nxt_entry >= late_min
+                    })
+                    .collect();
+                entries.sort_by(sort_by_entry); // TODO use different sorting, since should be in reserse for timsort?
+                total_order_prev_iterator(entries.into_iter(), exact, extra_info)
+                    .filter_map(filter_fn)
+            }
+        }
+    }
+
+    /// first_op is the first operation in the log in total order (this is used only if this is the first SP)
+    pub fn check_sp_exact<F: RWS>(
         &self,
         my_log_idx: LogIdx,
         new_sp: SpState,
-        exact: I,
+        exact: &[EntryInfo],
+        first_op: Option<LogEntryWeak>,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
+        // where to start the iterator from
+        println!(
+            "exact {:?}, extra info: {:?}, last op {:?}, not included: {:?}",
+            exact,
+            new_sp.sp.additional_ops,
+            self.last_op
+                .as_ref()
+                .map(|e| e.get_ptr(m, f).borrow().entry.get_entry_info()),
+            self.not_included_ops
+                .iter()
+                .map(|op| op.get_ptr().borrow().entry.get_entry_info())
+                .collect::<Vec<_>>()
+        );
+
+        // println!("min time {:?}", late_min);
         // create a total order iterator over the operations including the unused items from the previous
         // SP that takes the exact set from exact, and returns the rest as unused, until last_op
-        let (not_included_iter, log_iter) = self.get_iters(m, f)?;
-        let op_iter = total_order_exact_iterator(
-            not_included_iter,
-            log_iter,
-            exact,
-            new_sp.sp.additional_ops.iter().cloned(),
-        );
+        let extra_info = new_sp.sp.additional_ops.iter().cloned();
+        let last_op = self.get_last_op(first_op.clone(), m, f)?;
+        let early_ops = self.get_early_ops(last_op, exact.iter().cloned(), extra_info, m, f);
+
+        let (not_included_iter, log_iter) = self.get_iters(first_op, m, f)?;
+        let early_ops = early_ops.merge_by(not_included_iter, leq_by_entry);
+        let extra_info = new_sp.sp.additional_ops.iter().cloned();
+        let op_iter =
+            total_order_exact_iterator(early_ops, log_iter, exact.iter().cloned(), extra_info);
         let sp_result = self.perform_check_sp(&new_sp.sp, op_iter)?;
         Ok((
             OuterSp {
@@ -1062,28 +1180,60 @@ impl OuterSp {
         ))
     }
 
+    /// Checks for the operations in the log from the given iterators and new SP.
+    /// late_included and not_included are hints as to what operations to include and not include given by the
+    /// node that sent the Sp. They may not be used given that the real definition of the set of the Ops
+    /// must be given by the support hash of the new Sp.
+    /// If this calculation fails, then this node can ask an external node for the exact set of ops needed for
+    /// the new Sp, and check_sp_exact can be called with this set.
+    /// first_op is the first operation in the log in total order (this is used only if this is the first SP)
     pub fn check_sp_log_order<
         F: RWS,
-        J: Iterator<Item = EntryInfo>,
+        // J: Iterator<Item = EntryInfo>,
         K: Iterator<Item = EntryInfo>,
     >(
         &self,
         my_log_idx: LogIdx,
         new_sp: SpState,
-        late_included: J,
+        late_included: &[EntryInfo],
         not_included: K,
+        first_op: Option<LogEntryWeak>,
         m: &mut HashItems<LogEntry>,
         f: &mut LogFile<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
+        // where to start the iterator from
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
         // it uses included and not included to decide what operations to include
         // furthermore it includes items that have include_in_hash = true and are after the last operation of the previous
         // SP in the log
-        let (not_included_iter, log_iter) = self.get_iters(m, f)?;
+
+        let not_included: Vec<_> = not_included.collect();
+        println!(
+            "\ncheck log order sp: {:?}, late included {:?}, not included {:?}\n",
+            new_sp.sp, late_included, not_included
+        );
+        let not_included = not_included.into_iter();
+
+        let last_op = self.get_last_op(first_op.clone(), m, f)?;
+        let extra_info = new_sp.sp.additional_ops.iter().cloned();
+        let early_ops =
+            self.get_early_ops(last_op, late_included.iter().cloned(), extra_info, m, f);
+        let early_ops: Vec<_> = early_ops.collect();
+        println!(
+            "early ops {:?}",
+            early_ops
+                .iter()
+                .map(|op| op.ptr.borrow().entry.get_entry_info())
+                .collect::<Vec<_>>()
+        );
+        let early_ops = early_ops.into_iter();
+
+        let (not_included_iter, log_iter) = self.get_iters(first_op, m, f)?;
+        let early_ops = early_ops.merge_by(not_included_iter, leq_by_entry);
         let op_iter = total_order_check_iterator(
-            not_included_iter,
+            early_ops,
             log_iter,
-            late_included,
+            late_included.iter().cloned(),
             not_included,
             new_sp.sp.additional_ops.iter().cloned(),
         );
@@ -1101,13 +1251,35 @@ impl OuterSp {
         ))
     }
 
+    /// Returns the last operation that was included in this Sp.
+    /// first_op is the first operation in the log in total order (this is used only if this is the first SP)
+    fn get_last_op<F: RWS>(
+        &self,
+        first_op: Option<LogEntryWeak>,
+        m: &mut HashItems<LogEntry>,
+        f: &mut LogFile<F>,
+    ) -> Result<StrongPtrIdx> {
+        let last_op = self.last_op.as_ref().or_else(|| first_op.as_ref());
+        Ok(last_op
+            .ok_or(LogError::PrevSpHasNoLastOp)?
+            .to_strong_ptr_idx(m, f))
+    }
+
+    /// Returns the iterators for this Sp.
+    /// The first iterates items from self.not_included_ops.
+    /// The second iterates all items later in the log and any ops with time less than late_min
+    /// (that are before or after this Sp in the log) and have include_in_hash = false
+    /// (see total_order_after_late_iter).
+    /// first_op is the first operation in the log in total order (this is used only if this is the first SP)
     fn get_iters<'a, F: RWS>(
         &'a self,
+        // late_min: Option<EntryInfo>,
+        first_op: Option<LogEntryWeak>,
         m: &'a mut HashItems<LogEntry>,
         f: &'a mut LogFile<F>,
     ) -> Result<(
         impl Iterator<Item = StrongPtrIdx> + 'a,
-        TotalOrderAfterIterator<F>,
+        TotalOrderAfterIter<F>,
     )> {
         // we make an iterator that goes through the log in total order
         // the iterator starts from the log entry of the last op included in the previous SP (self) and traverses the log
@@ -1116,21 +1288,19 @@ impl OuterSp {
         let not_included_iter = self
             .not_included_ops
             .iter()
-            .map(|nxt| StrongPtrIdx::new(nxt.file_idx, Rc::clone(nxt.ptr.as_ref().unwrap()))); // items from previous sp that are earlier in the log, we need to check if these are included
-        let last_op = self
-            .last_op
-            .as_ref()
-            .ok_or(LogError::PrevSpHasNoLastOp)?
-            .to_strong_ptr_idx(m, f);
+            .map(|nxt| StrongPtrIdx::new(nxt.file_idx, Rc::clone(nxt.ptr.as_ref().unwrap())));
+        // items from previous sp that are earlier in the log, we need to check if these are included
         // we only want operations after the last op of the previous sp in the log
+        let last_op = self.get_last_op(first_op, m, f)?;
         let log_iter = if self.sp.sp.is_init() {
             // for the inital SP, we always start from the first op, and include all ops
-            total_order_after_all_iterator(&last_op, m, f)
+            total_order_after_all_iter(&last_op, m, f)
         } else {
-            // if prev sp is not the inital SP, then we need to move forward 1 op since last op was already included in prev sp
-            let mut log_iter = total_order_after_iterator(&last_op, m, f);
-            log_iter.next();
-            log_iter
+            // for later Sps we need to start from the op after last_op
+            // as well as any late arrivals, which will be only included if they are referenced as being included directly
+            total_order_after_late_iter(&last_op, m, f)
+            // log_iter.next();
+            // log_iter
         };
         Ok((not_included_iter, log_iter))
     }
@@ -1178,6 +1348,7 @@ impl OuterSp {
             if nxt_op_op.arrived_late {
                 late_included.push((&nxt_op).into());
             }
+            println!("added op {:?} to Sp during log order check", nxt_op_op.op);
             // add the hash of the op
             hasher.update(nxt_op_op.op.hash.as_bytes());
             count += 1;
@@ -1208,7 +1379,7 @@ impl OuterSp {
 
 impl Display for OuterSp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "SP")
+        write!(f, "SP, {:?}", self.sp)
     }
 }
 
@@ -1270,23 +1441,32 @@ impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
 // sp.not_included are all ops that are not late, and are not included in the SP
 // - this will never change at the local log because any ops that arrives later will be late
 
-// but how to track the ops that are late?
-pub struct LogIteratorAfterSorted {
-    pub prev_entry: Option<LogEntryStrong>,
-}
-
-/// total order iterator that only includes log entries with a larger (or equal) log index than the input
-pub struct TotalOrderAfterIterator<'a, F> {
+/// Total order iterator that only includes log entries with a larger (or equal) log index than the input.
+pub struct TotalOrderAfterIter<'a, F> {
     iter: TotalOrderIterator<'a, F>,
-    min_index: u64,
+    min_index: LogIdx,
+    min_entry: EntryInfo,
+    include_late: bool,
+    count: usize,
 }
 
-impl<'a, F: RWS> Iterator for TotalOrderAfterIterator<'a, F> {
+// instead collect the exact set of early ones in a vec before so we only include those (instead of going backwards)
+
+impl<'a, F: RWS> Iterator for TotalOrderAfterIter<'a, F> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(nxt) = self.iter.next() {
-            if nxt.ptr.borrow().log_index >= self.min_index {
+            println!(
+                "nxt to check {:?}, count {}",
+                nxt.ptr.borrow().entry.as_op(),
+                self.count
+            );
+            self.count += 1;
+            if nxt.ptr.borrow().log_index >= self.min_index
+                || (self.include_late && nxt.ptr.borrow().entry.as_op().arrived_late)
+                || nxt.ptr.borrow().entry.get_entry_info() > self.min_entry
+            {
                 return Some(nxt);
             }
         }
@@ -1294,27 +1474,60 @@ impl<'a, F: RWS> Iterator for TotalOrderAfterIterator<'a, F> {
     }
 }
 
-/// Returns an total order iterator that returns items larger than start.
-pub fn total_order_after_all_iterator<'a, F>(
+/// A total order op iterator that returns entries that are either after start in the log, or
+/// have time after late_min and also have include_in_hash = false.
+/// If late_min is None, the time of the start input is used instead for values wiht include_in_hash = false.
+/// This is used when traversing after the last op in the previous SP, where it we only want to see new ops
+/// (later in the log), or ops that were late and not included by default in the SP
+/// (these would be the ops in "sp.additional_ops", or when using calculate SP exact).
+/// TODO do this more efficiently
+pub fn total_order_after_late_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
+    // late_min: Option<EntryInfo>,
     m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
-) -> TotalOrderAfterIterator<'a, F> {
-    TotalOrderAfterIterator {
+) -> TotalOrderAfterIter<'a, F> {
+    // println!("after {:?}, time {:?}", start, late_min);
+    // if prev sp is not the inital SP, then we need to move forward 1 op since last op was already included in prev sp
+    let min_index = start.ptr.borrow().log_index + 1;
+    let min_entry = start.ptr.borrow().entry.get_entry_info();
+    TotalOrderAfterIter {
         iter: total_order_iterator(&start.into(), true, m, f),
-        min_index: 0,
+        min_index,
+        min_entry,
+        include_late: true,
+        count: 0,
     }
 }
 
-/// Returns an total order iterator that returns items larger than start AND are after start in the log.
-pub fn total_order_after_iterator<'a, F>(
+/// Returns an total order iterator that returns items larger than start.
+/// This is the same as a total order iterator from start.
+pub fn total_order_after_all_iter<'a, F>(
     start: &StrongPtrIdx,
     m: &'a mut HashItems<LogEntry>,
     f: &'a mut LogFile<F>,
-) -> TotalOrderAfterIterator<'a, F> {
-    TotalOrderAfterIterator {
+) -> TotalOrderAfterIter<'a, F> {
+    TotalOrderAfterIter {
+        iter: total_order_iterator(&start.into(), true, m, f),
+        min_index: 0,
+        min_entry: start.ptr.borrow().entry.get_entry_info(),
+        include_late: true,
+        count: 0,
+    }
+}
+
+/// Returns an total order iterator that returns start and items larger than start AND are after start in the log.
+pub fn total_order_after_iter<'a, F>(
+    start: &StrongPtrIdx,
+    m: &'a mut HashItems<LogEntry>,
+    f: &'a mut LogFile<F>,
+) -> TotalOrderAfterIter<'a, F> {
+    TotalOrderAfterIter {
         iter: total_order_iterator(&start.into(), true, m, f),
         min_index: start.ptr.borrow().log_index,
+        min_entry: start.ptr.borrow().entry.get_entry_info(),
+        include_late: false,
+        count: 0,
     }
 }
 #[derive(Debug)]
@@ -1323,6 +1536,89 @@ pub enum Supported {
     SupportedData(EntryInfoData),
     NotSupported,
     Skipped(EntryInfo),
+}
+
+/// Creates an iterator that goes through prev_items (assuming it is sorted) checking for the items
+/// in exact and extra info.
+/// It is used to check for the exact operations that were before the last operation of the
+/// previous Sp, when checking a new Sp.
+pub fn total_order_prev_iterator<'a, J, K, I>(
+    prev_items: I,
+    exact: J,
+    extra_info: K,
+) -> TotalOrderExactIterator<'a, J, K>
+where
+    I: Iterator<Item = StrongPtrIdx> + 'a,
+    J: Iterator<Item = EntryInfo>,
+    K: Iterator<Item = EntryInfoData>,
+{
+    let iter = Box::new(prev_items);
+    TotalOrderExactIterator {
+        iter,
+        extra_info_check: ExactCheck {
+            last_included: None,
+            included: extra_info,
+        },
+        exact_check: ExactCheck {
+            last_included: None,
+            included: exact,
+        },
+    }
+}
+
+/// Creates an iterator that goes through prev_not_included and log_iter (merged into a single sorted interator
+/// assuming they are sorted when input), checking for the items in exact and extra info.
+/// It is used as the iterator for checking an Sp with an exact set of ops.
+pub fn total_order_exact_iterator<'a, J, K, I, F: RWS>(
+    prev_not_included: I,
+    log_iter: TotalOrderAfterIter<'a, F>,
+    exact: J,
+    extra_info: K,
+) -> TotalOrderExactIterator<'a, J, K>
+where
+    I: Iterator<Item = StrongPtrIdx> + 'a,
+    J: Iterator<Item = EntryInfo>,
+    K: Iterator<Item = EntryInfoData>,
+{
+    // now we merge the prev_not_included and the log_iter into a single iterator them so we traverse the two of them in total order
+    let iter = Box::new(
+        log_iter
+            .merge_by(prev_not_included, |x, y| {
+                x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
+            })
+            .dedup_by(|l, r| l.file_idx == r.file_idx),
+    );
+    TotalOrderExactIterator {
+        iter,
+        extra_info_check: ExactCheck {
+            last_included: None,
+            included: extra_info,
+        },
+        exact_check: ExactCheck {
+            last_included: None,
+            included: exact,
+        },
+    }
+}
+
+impl<'a, J, K> TotalOrderExactIterator<'a, J, K>
+where
+    J: Iterator<Item = EntryInfo>,
+    K: Iterator<Item = EntryInfoData>,
+{
+    fn empty(j: J, k: K) -> Self {
+        TotalOrderExactIterator {
+            iter: Box::new(iter::empty()),
+            extra_info_check: ExactCheck {
+                last_included: None,
+                included: k,
+            },
+            exact_check: ExactCheck {
+                last_included: None,
+                included: j,
+            },
+        }
+    }
 }
 
 // total order iterator that only includes log entries with a larger (or equal) log index than the input,
@@ -1335,34 +1631,6 @@ where
     iter: Box<dyn Iterator<Item = StrongPtrIdx> + 'a>,
     extra_info_check: ExactCheck<K, EntryInfoData>,
     exact_check: ExactCheck<J, EntryInfo>,
-}
-
-pub fn total_order_exact_iterator<'a, J, K, I, F: RWS>(
-    prev_not_included: I,
-    log_iter: TotalOrderAfterIterator<'a, F>,
-    exact: J,
-    extra_info: K,
-) -> TotalOrderExactIterator<'a, J, K>
-where
-    I: Iterator<Item = StrongPtrIdx> + 'a,
-    J: Iterator<Item = EntryInfo>,
-    K: Iterator<Item = EntryInfoData>,
-{
-    // now we merge the prev_not_included and the log_iter into a single iterator them so we traverse the two of them in total order
-    let iter = Box::new(log_iter.merge_by(prev_not_included, |x, y| {
-        x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
-    }));
-    TotalOrderExactIterator {
-        iter,
-        extra_info_check: ExactCheck {
-            last_included: None,
-            included: extra_info,
-        },
-        exact_check: ExactCheck {
-            last_included: None,
-            included: exact,
-        },
-    }
 }
 
 impl<'a, J, K> Iterator for TotalOrderExactIterator<'a, J, K>
@@ -1549,7 +1817,7 @@ where
 
 pub fn total_order_check_iterator<'a, J, K, L, I, F: RWS>(
     prev_not_included: I,
-    log_iter: TotalOrderAfterIterator<'a, F>,
+    log_iter: TotalOrderAfterIter<'a, F>,
     included: J,
     not_included: L,
     extra_info: K,
@@ -1561,9 +1829,13 @@ where
     L: Iterator<Item = EntryInfo>,
 {
     // now we merge the prev_not_included and the log_iter into a single iterator them so we traverse the two of them in total order
-    let iter = Box::new(log_iter.merge_by(prev_not_included, |x, y| {
-        x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
-    }));
+    let iter = Box::new(
+        log_iter
+            .merge_by(prev_not_included, |x, y| {
+                x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
+            })
+            .dedup_by(|l, r| l.file_idx == r.file_idx),
+    );
     TotalOrderCheckIterator {
         iter,
         extra_info_check: ExactCheck {
@@ -1622,10 +1894,53 @@ where
     }
 }
 
+/// Used to iterate the Ops in the log in the order entries were added to the log.
+pub struct LogOpIterator<'a, F>(LogIterator<'a, F>);
+
+impl<'a, F: RWS> LogOpIterator<'a, F> {
+    /// Creates a new op iterator from a LogIterator.
+    pub fn new(i: LogIterator<'a, F>) -> Self {
+        LogOpIterator(i)
+    }
+}
+
+impl<'a, F: RWS> Iterator for LogOpIterator<'a, F> {
+    type Item = StrongPtrIdx;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(nxt) = self.0.next() {
+            if nxt.ptr.borrow().entry.is_op() {
+                return Some(nxt);
+            }
+        }
+        None
+    }
+}
+
+/// Used to iterate the log in the order entries were added to the log.
 pub struct LogIterator<'a, F> {
-    pub prv_entry: Option<StrongPtrIdx>,
-    pub m: &'a mut HashItems<LogEntry>,
-    pub f: &'a mut LogFile<F>,
+    prv_entry: Option<StrongPtrIdx>,
+    m: &'a mut HashItems<LogEntry>,
+    f: &'a mut LogFile<F>,
+    forward: bool,
+}
+
+impl<'a, F> LogIterator<'a, F> {
+    /// Create a new log iterator starting from (and including) prev_entry.
+    /// Moves either forward or backward in the log in the order entries were added.
+    pub(crate) fn new(
+        prv_entry: Option<StrongPtrIdx>,
+        m: &'a mut HashItems<LogEntry>,
+        f: &'a mut LogFile<F>,
+        forward: bool,
+    ) -> LogIterator<'a, F> {
+        LogIterator {
+            prv_entry,
+            m,
+            f,
+            forward,
+        }
+    }
 }
 
 impl<'a, F: RWS> Iterator for LogIterator<'a, F> {
@@ -1635,11 +1950,19 @@ impl<'a, F: RWS> Iterator for LogIterator<'a, F> {
         let ret = self.prv_entry.as_ref().cloned();
         self.prv_entry = match self.prv_entry.take() {
             None => None,
-            Some(prv) => prv
-                .ptr
-                .borrow()
-                .get_prev()
-                .map(|mut entry| entry.strong_ptr_idx(self.m, self.f)),
+            Some(prv) => {
+                if self.forward {
+                    prv.ptr
+                        .borrow()
+                        .get_next()
+                        .map(|mut entry| entry.strong_ptr_idx(self.m, self.f))
+                } else {
+                    prv.ptr
+                        .borrow()
+                        .get_prev()
+                        .map(|mut entry| entry.strong_ptr_idx(self.m, self.f))
+                }
+            }
         };
         ret
     }

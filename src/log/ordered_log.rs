@@ -62,7 +62,7 @@ pub trait LogOrdering {
 
 /// Contains a local log, plus the LogOrdering trait to keep track.
 pub struct OrderedLog<F: RWS, O: LogOrdering> {
-    l: LocalLog<F>,
+    pub(crate) l: LocalLog<F>,
     pub(crate) ordering: O,
     // phantom: PhantomData<S>,
 }
@@ -148,9 +148,10 @@ impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
             .sp
             .to_sp(self.serialize_option())
             .map_err(OrderingError::LogError)?;
+        let exact: Vec<_> = sp_p.exact.iter().map(|op| op.into()).collect();
         self.l
             .l
-            .check_sp_exact(sp, sp_p.exact.iter().map(|op| op.into()), ti)
+            .check_sp_exact(sp, &exact, ti)
             .map_err(OrderingError::LogError)?;
         Ok(())
     }
@@ -388,12 +389,55 @@ impl Supporters for SupVec {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct SupportInfo {
+    local_supported: bool, // true if received an Sp from the local node supporting this op
+    creator_supported: bool, // true if received an SP from the creator of this op supporting this op
+}
+
+impl Default for SupportInfo {
+    fn default() -> Self {
+        SupportInfo {
+            local_supported: false,
+            creator_supported: false,
+        }
+    }
+}
+
+impl SupportInfo {
+    /// Creates a new SupportInfo with support set to true.
+    pub fn new_supported() -> SupportInfo {
+        SupportInfo {
+            local_supported: true,
+            creator_supported: true,
+        }
+    }
+
+    /// Returns true if supported both by the local node and the op creator.
+    #[inline(always)]
+    pub fn is_supported(&self) -> bool {
+        self.local_supported && self.creator_supported
+    }
+
+    /// Returns true if supported by the op creator.
+    #[inline(always)]
+    pub fn creator_supported(&self) -> bool {
+        self.creator_supported
+    }
+
+    /// Returns true if supported by the local node.
+    #[inline(always)]
+    pub fn local_supported(&self) -> bool {
+        self.local_supported
+    }
+}
+
 #[derive(Debug)]
 pub struct PendingOp<S: Supporters> {
     pub supporters: S, // IDs of nodes that have supported this op through SPs
     pub data: OpEntryInfo,
-    pub local_supported: bool,
     pub dependent_sps: Option<Vec<LogIdx>>, // SPs that depend on this op
+    support: SupportInfo,
 }
 
 impl<S: Supporters> PendingOp<S> {
@@ -402,14 +446,19 @@ impl<S: Supporters> PendingOp<S> {
         PendingOp {
             supporters: S::default(), // ids SPs that have supported us
             data,
-            local_supported: false,
+            support: SupportInfo::default(),
             dependent_sps: Some(vec![]), // sps that are waiting until we have local support
         }
     }
 
     #[inline(always)]
+    pub fn get_support_info(&self) -> SupportInfo {
+        self.support
+    }
+
+    #[inline(always)]
     pub fn is_completed(&self, commit_count: usize) -> bool {
-        self.local_supported && self.supporters.get_count() >= commit_count
+        self.support.is_supported() && self.supporters.get_count() >= commit_count
     }
 
     #[inline(always)]
@@ -417,17 +466,18 @@ impl<S: Supporters> PendingOp<S> {
         self.dependent_sps.as_mut().unwrap().push(log_idx);
     }
 
+    /// Called when id supports the op.
+    /// local_id is the id of the local node.
+    /// Returns true if id is a new supporter.
     #[inline(always)]
-    pub fn got_supporter(&mut self, id: Id) -> bool {
+    pub fn got_supporter(&mut self, id: Id, local_id: Id) -> bool {
         let new_id = self.supporters.add_id(id);
-        if new_id && !self.local_supported && id == self.data.op.info.id {
-            self.local_supported = true;
+        if new_id && !self.support.creator_supported && id == self.data.op.info.id {
+            self.support.creator_supported = true;
+        }
+        if new_id && !self.support.local_supported && id == local_id {
+            self.support.local_supported = true;
         }
         new_id
-    }
-
-    #[inline(always)]
-    pub fn local_supported(&self) -> bool {
-        self.local_supported
     }
 }

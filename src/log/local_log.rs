@@ -1,7 +1,6 @@
 use std::fmt::Debug;
 
 use bincode::{DefaultOptions, Options};
-use log::debug;
 
 use crate::{
     errors::EncodeError,
@@ -11,7 +10,7 @@ use crate::{
 
 use super::{
     basic_log::Log,
-    entry::LogEntry,
+    entry::{LogEntry, LogEntryStrong, StrongPtrIdx},
     log_error::{LogError, Result},
     op::{EntryInfo, Op, OpEntryInfo},
     sp::{Sp, SpInfo, SpState},
@@ -194,7 +193,8 @@ impl<F: RWS> LocalLog<F> {
                 }
             }
         }
-        self.process_sp_exact(ti, sp, sp_p.exact.iter().map(|op| op.into()))
+        let exact: Vec<_> = sp_p.exact.iter().map(|op| op.into()).collect();
+        self.process_sp_exact(ti, sp, &exact)
     }
 
     pub fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess> {
@@ -246,13 +246,15 @@ impl<F: RWS> LocalLog<F> {
         }
     }
 
-    fn process_sp_exact<T: TimeInfo, I: Iterator<Item = EntryInfo>>(
+    fn process_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
         sp: Sp,
-        exact: I,
+        exact: &[EntryInfo],
     ) -> Result<(SpToProcess, SpDetails)> {
         let id = sp.info.id;
+        println!("\nprocess exact sp: {:?}, ops: {:?}\n", sp, exact);
+
         let (outer_sp, ops) = self.l.check_sp_exact(sp, exact, ti)?;
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if sp.ptr.borrow().entry.get_entry_info().basic.id == self.id {
@@ -281,6 +283,7 @@ impl<F: RWS> LocalLog<F> {
         not_included: &[EntryInfo],
     ) -> Result<(SpToProcess, SpDetails)> {
         let id = sp.info.id;
+        println!("late included {:?}", late_included);
         let (outer_sp, ops) = self.l.check_sp(sp, &late_included, &not_included, ti)?;
         // println!("sp hash {:?}", outer_sp.sp.hash);
         let sp = self.l.insert_outer_sp(outer_sp)?;
@@ -314,23 +317,82 @@ impl<F: RWS> LocalLog<F> {
             // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
             let last_sp = self.l.find_sp(self.last_sp, None)?;
+            println!("last SP: {:?}", last_sp.ptr);
             let last_sp_ref = last_sp.ptr.borrow();
-            debug!(
-                "create local sp time {}, last sp {}, {:?}",
+            let last_sp_entry = last_sp_ref.entry.as_sp();
+            println!(
+                "\n\ncreate local sp time {}, last sp {}, {:?}, last op {:?}, not included: {:?}\n",
                 t,
                 last_sp_ref.log_index,
-                last_sp_ref.entry.get_entry_info()
+                last_sp_ref.entry.get_entry_info(),
+                last_sp_entry.last_op.as_ref().map(|op| op
+                    .get_ptr(&mut self.l.m, &mut self.l.f)
+                    .borrow()
+                    .entry
+                    .as_op()
+                    .op
+                    .clone()),
+                last_sp_entry
+                    .not_included_ops
+                    .iter()
+                    .map(|op| op.get_ptr().borrow().entry.as_op().op.op.clone())
+                    .collect::<Vec<Op>>()
             );
-            let op_iter = last_sp_ref
-                .entry
-                .as_sp()
-                .get_ops_after_iter(&mut self.l.m, &mut self.l.f)?
+            // collect the operations later in the log that have time earlier in than last op
+            // we will add these specifically as they would not be included normally as they
+            // arrived late
+            let after_ops = {
+                println!(
+                    "is init sp {}",
+                    self.l.is_init_sp(&last_sp_ref.entry.get_entry_info())
+                );
+                // last_sp_entry.last_op is only None if this is the initial SP
+                // in this case after_ops will be None the call to get_ops_after_iter
+                // will return all ops afterwards in the log
+                last_sp_entry.last_op.as_ref().map(|last_op| {
+                    let mut last_strong: LogEntryStrong = last_op.into();
+                    let largest_op = last_strong
+                        .get_ptr(&mut self.l.m, &mut self.l.f)
+                        .borrow()
+                        .entry
+                        .get_entry_info();
+                    let mut iter = self.l.op_iterator_from(last_strong, true);
+                    // move forward one op so we dont include the last_op
+                    iter.next();
+                    // take the entries that arrive late (i.e. are after sp.last_op in the log,
+                    // and have smaller total order time)
+                    let mut late_items: Vec<StrongPtrIdx> = iter
+                        .filter(move |nxt_op| {
+                            let nxt_op_ptr = nxt_op.ptr.borrow();
+                            nxt_op_ptr.entry.get_entry_info() < largest_op
+                                && nxt_op_ptr.entry.as_op().arrived_late
+                        })
+                        .collect();
+                    // they must be sorted since they will be moreded with the other iterators
+                    late_items.sort_by(|l, r| {
+                        l.ptr
+                            .borrow()
+                            .entry
+                            .as_op()
+                            .op
+                            .cmp(&r.ptr.borrow().entry.as_op().op)
+                    });
+                    late_items
+                })
+            };
+            let op_iter = last_sp_entry
+                .get_ops_after_iter(
+                    after_ops,
+                    self.l.get_first_op(),
+                    &mut self.l.m,
+                    &mut self.l.f,
+                )?
                 .filter_map(|op_rc| {
                     let op_ref = op_rc.ptr.borrow();
                     let op = op_ref.entry.as_op();
-                    debug!(
-                        "add op to local sp: id {}, time {} add op time {} hash {:?}",
-                        op.op.op.info.id, t, op.op.op.info.time, op.op.hash
+                    println!(
+                        "add op to local sp: id {}, time {} , op: {:?}",
+                        op.op.op.info.id, t, op
                     );
                     if op.op.op.info.time <= t {
                         if op.arrived_late {

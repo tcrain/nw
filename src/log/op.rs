@@ -31,12 +31,16 @@ pub fn get_empty_data() -> OpData {
     Rc::new([0; OP_LEN].to_vec())
 }
 
+/// Time field is first since we order by time, then Id, then hash,
+/// also see OpState and EntryInfo which use the same ordering.
 #[derive(Clone, Copy, Ord, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct BasicInfo {
     pub time: Time, // real time of event creation
     pub id: Id,     // id of creator
 }
 
+/// Time field is first since we order by time, then Id, then hash,
+/// also see OpState and BasicInfo which use the same ordering.
 #[derive(Clone, Copy, Ord, Eq, PartialEq, PartialOrd, Serialize, Deserialize, Debug)]
 pub struct EntryInfo {
     // order first by time, then by ID, then by hash
@@ -46,6 +50,12 @@ pub struct EntryInfo {
 
 impl From<EntryInfoData> for EntryInfo {
     fn from(ei: EntryInfoData) -> Self {
+        ei.info
+    }
+}
+
+impl From<&EntryInfoData> for EntryInfo {
+    fn from(ei: &EntryInfoData) -> Self {
         ei.info
     }
 }
@@ -76,11 +86,19 @@ impl Default for EntryInfo {
         }
     }
 }
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, Clone)]
 pub struct OpEntryInfo {
     pub op: Op,
     pub hash: Hash,
     pub log_index: LogIdx,
+}
+
+impl Eq for OpEntryInfo {}
+
+impl PartialEq for OpEntryInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash.eq(&other.hash)
+    }
 }
 
 /// EntryInfoData is used in Sp.additional_ops to give details about ops that the Sp includes, possibily with some
@@ -89,6 +107,13 @@ pub struct OpEntryInfo {
 pub struct EntryInfoData {
     pub info: EntryInfo,
     pub data: OpData,
+}
+
+pub fn min_entry(e1: Option<&EntryInfo>, e2: Option<&EntryInfoData>) -> Option<EntryInfo> {
+    match e1 {
+        Some(t1) => e2.map_or(Some(*t1), |e2| Some(*t1.min(&e2.into()))),
+        None => e2.map(|e2| e2.into()),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,6 +162,8 @@ impl PartialOrd for OpState {
     }
 }
 
+/// Time field is first checked since we order by time, then Id, then hash,
+/// also see BasicInfo and EntryInfo which use the same ordering.
 impl Ord for OpState {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.op.info.cmp(&other.op.info) {
@@ -155,7 +182,7 @@ impl PartialEq for OpState {
     }
 }
 
-#[derive(Clone, Ord, Eq, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Op {
     pub info: BasicInfo,
     pub data: OpData,
@@ -210,11 +237,12 @@ pub(crate) mod tests {
         let id = 1;
         let op1 = Op::new(id, gen_rand_data(), &mut ti);
         let op2 = Op::new(id, gen_rand_data(), &mut ti);
-        assert!(op1 < op2);
+        assert!(op1.info < op2.info);
         let mut op3 = op1.clone();
-        assert!(op1 == op3);
+        assert_eq!(op1.info, op3.info);
+        assert_eq!(op1.data, op3.data);
         op3.info.id += 1;
-        assert!(op1 < op3);
+        assert!(op1.info < op3.info);
     }
 
     #[test]
@@ -226,9 +254,10 @@ pub(crate) mod tests {
         let enc = serialize(&op1).unwrap();
         // println!("op enc len: {}", enc.len());
 
-        let dec = deserialize(&enc).unwrap();
+        let dec: Op = deserialize(&enc).unwrap();
 
-        assert_eq!(op1, dec);
+        assert_eq!(op1.info, dec.info);
+        assert_eq!(op1.data, dec.data);
 
         let mut buf = vec![];
         let mut ops = vec![];
@@ -239,8 +268,9 @@ pub(crate) mod tests {
         }
         let mut reader = Cursor::new(buf);
         for nxt in ops {
-            let op = deserialize_from(&mut reader).unwrap();
-            assert_eq!(nxt, op);
+            let op: Op = deserialize_from(&mut reader).unwrap();
+            assert_eq!(nxt.info, op.info);
+            assert_eq!(nxt.data, op.data);
         }
     }
 }
