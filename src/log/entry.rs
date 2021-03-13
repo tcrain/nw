@@ -14,9 +14,8 @@ use log::debug;
 use verification::Hash;
 
 use super::{
-    hash_items::HashItems,
+    basic_log::LogState,
     log_error::{LogError, Result},
-    log_file::LogFile,
     op::{min_entry, EntryInfo, EntryInfoData, OpEntryInfo, OpState},
     sp::{Sp, SpState},
     LogIdx,
@@ -59,9 +58,9 @@ impl Drop for LogEntry {
 }
 
 impl LogEntry {
-    fn finish_deserialize<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
+    fn finish_deserialize<F: RWS>(&mut self, state: &mut LogState<F>) {
         match &mut self.entry {
-            PrevEntry::Sp(sp) => sp.finish_deserialize(m, f),
+            PrevEntry::Sp(sp) => sp.finish_deserialize(state),
             PrevEntry::Op(_) => (),
         }
     }
@@ -80,14 +79,10 @@ impl LogEntry {
         }
     }
 
-    fn from_file<F: RWS>(
-        idx: u64,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Result<LogEntry> {
-        f.seek_to(idx)?;
+    fn from_file<F: RWS>(idx: u64, state: &mut LogState<F>) -> Result<LogEntry> {
+        state.f.seek_to(idx)?;
         // first read the serialized bytes
-        let (entry_info, mut entry): (_, LogEntry) = f.read_log()?;
+        let (entry_info, mut entry): (_, LogEntry) = state.f.read_log()?;
         // sanity check
         if entry_info.start_location != entry.file_index {
             panic!("entry has an invlid file index")
@@ -95,20 +90,20 @@ impl LogEntry {
         // write the serialized size
         entry.ser_size = Some(entry_info.bytes_consumed);
         // check the hash of the internal operation
-        entry.entry.check_hash(f.serialize_option())?;
+        entry.entry.check_hash(state.f.serialize_option())?;
         // read the location of the previous log
-        let (prev_log, _) = f.read_u64()?;
+        let (prev_log, _) = state.f.read_u64()?;
         // read the location of the previous total order
-        let (prev_to, prev_to_info) = f.read_u64()?;
+        let (prev_to, prev_to_info) = state.f.read_u64()?;
         // read the location of the next total order
         let next_to = if !prev_to_info.at_end {
-            f.read_u64()?.0
+            state.f.read_u64()?.0
         } else {
             0
         };
         // see if there is a next log entry
         let next_log = {
-            let info = f.check_index();
+            let info = state.f.check_index();
             if info.at_end {
                 // there is no next log
                 0
@@ -120,7 +115,7 @@ impl LogEntry {
         entry.to_pointers = to_pointers;
         let log_pointers = LogPointers::from_file_indicies(&entry, prev_log, next_log);
         entry.log_pointers = log_pointers;
-        entry.finish_deserialize(m, f);
+        entry.finish_deserialize(state);
         entry.check_valid();
         debug!("loaded from disk {}", entry.log_index);
         Ok(entry)
@@ -144,43 +139,41 @@ impl LogEntry {
     }
 
     // write pointers when the entry is first received, the next pointer in the total order should be unknown
-    pub fn write_pointers_initial<F: RWS>(
-        &mut self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Result<()> {
+    pub fn write_pointers_initial<F: RWS>(&mut self, state: &mut LogState<F>) -> Result<()> {
         // the entry is always added at the end of the log
-        f.seek_to_end();
+        state.f.seek_to_end();
         // First update the previous' next total order pointer, which is at the end of the log where we are now
         if self.log_index > 1 {
             // log entry 1 does not havt to do this since there is no previous entry to update
             match self.to_pointers.prev_to.as_mut() {
                 Some(prev) => {
-                    let prev_ptr = prev.get_ptr(m, f);
+                    let prev_ptr = prev.get_ptr(state);
                     let prev_ref = prev_ptr.borrow_mut();
                     if prev_ref.log_index == self.log_index - 1 {
                         // if this is the previous entry in the log then we just write the next to pointer
-                        f.write_u64(self.file_index)?;
+                        state.f.write_u64(self.file_index)?;
                     } else {
                         // the previous log entry is not the previous total order entry, so we seek to it
-                        f.seek_to(prev_ref.file_index + prev_ref.ser_size.unwrap() + 16)?;
+                        state
+                            .f
+                            .seek_to(prev_ref.file_index + prev_ref.ser_size.unwrap() + 16)?;
                         // now update the previous entries next to pointer
-                        f.write_u64(self.file_index)?;
+                        state.f.write_u64(self.file_index)?;
                         // go back to my location - 8, which is where the previous log entries' total order next pointer is
-                        f.seek_to(self.file_index - 8)?;
+                        state.f.seek_to(self.file_index - 8)?;
                         // we write 0 since the previous log entry does not have a next total order value yet
-                        f.write_u64(0)?;
+                        state.f.write_u64(0)?;
                     }
                 }
                 None => {
                     // there is no previous total order entry, so just write 0
-                    f.write_u64(0)?;
+                    state.f.write_u64(0)?;
                 }
             }
         }
         // sanity check
         {
-            let check = f.check_index();
+            let check = state.f.check_index();
             if !check.at_end {
                 panic!("should be at the end of the file when writing new entries");
             }
@@ -189,28 +182,28 @@ impl LogEntry {
             }
         }
         // write my serialized bytes
-        let info = f.append_log(self)?;
+        let info = state.f.append_log(self)?;
         self.ser_size = Some(info.bytes_consumed); // keep the size of this entry in bytes
                                                    // write the location of the previous log entry
-        let prv_location = match self.log_pointers.get_prev(m, f) {
+        let prv_location = match self.log_pointers.get_prev(state) {
             Some(prv) => prv.borrow().file_index,
             None => 0,
         };
-        f.write_u64(prv_location)?;
+        state.f.write_u64(prv_location)?;
         // write the location of the previous total order
-        let prv_location = match self.to_pointers.get_prev_to(m, f) {
+        let prv_location = match self.to_pointers.get_prev_to(state) {
             Some(prv) => prv.borrow().file_index,
             None => 0,
         };
-        f.write_u64(prv_location)?;
+        state.f.write_u64(prv_location)?;
         // now if we have another entry after us in the total order, we must update that entries' previous pointer
         if let Some(mut nxt) = self.to_pointers.get_next_to_strong() {
-            let ntx_ptr = nxt.get_ptr(m, f);
+            let ntx_ptr = nxt.get_ptr(state);
             let nxt_ref = ntx_ptr.borrow();
             // the previous total order pointer is after the serialized entry and the previous log entry pointer
             let nxt_prev_file = nxt_ref.file_index + nxt_ref.ser_size.unwrap() + 8;
-            f.seek_to(nxt_prev_file)?;
-            f.write_u64(self.file_index)?;
+            state.f.seek_to(nxt_prev_file)?;
+            state.f.write_u64(self.file_index)?;
             // f.seek_to_end();
         }
         Ok(())
@@ -361,21 +354,13 @@ impl TotalOrderPointers {
     }
 
     #[inline(always)]
-    pub fn get_prev_to<F: RWS>(
-        &self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Option<StrongPtr> {
-        self.prev_to.as_ref().map(|entry| entry.get_ptr(m, f))
+    pub fn get_prev_to<F: RWS>(&self, state: &mut LogState<F>) -> Option<StrongPtr> {
+        self.prev_to.as_ref().map(|entry| entry.get_ptr(state))
     }
 
     #[inline(always)]
-    pub fn get_next_to<F: RWS>(
-        &self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Option<StrongPtr> {
-        self.next_to.as_ref().map(|entry| entry.get_ptr(m, f))
+    pub fn get_next_to<F: RWS>(&self, state: &mut LogState<F>) -> Option<StrongPtr> {
+        self.next_to.as_ref().map(|entry| entry.get_ptr(state))
     }
 
     #[inline(always)]
@@ -392,14 +377,13 @@ impl TotalOrderPointers {
 pub fn set_next_total_order<F: RWS>(
     prev: &StrongPtrIdx,
     new_next: &StrongPtrIdx,
-    m: &mut HashItems<LogEntry>,
-    f: &mut LogFile<F>,
+    state: &mut LogState<F>,
 ) {
     match prev.ptr.borrow().to_pointers.next_to.as_ref() {
         None => (),
         Some(nxt) => {
             new_next.ptr.borrow_mut().to_pointers.next_to = Some(nxt.clone());
-            nxt.get_ptr(m, f).borrow_mut().to_pointers.prev_to = Some(new_next.into());
+            nxt.get_ptr(state).borrow_mut().to_pointers.prev_to = Some(new_next.into());
         }
     };
     new_next.ptr.borrow_mut().to_pointers.prev_to = Some(prev.into());
@@ -476,8 +460,8 @@ impl LogEntryKeep {
         self.ptr.as_ref().expect("should not be none")
     }
 
-    fn load_pointer<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
-        self.ptr = Some(get_ptr(self.file_idx, m, f))
+    fn load_pointer<F: RWS>(&mut self, state: &mut LogState<F>) {
+        self.ptr = Some(get_ptr(self.file_idx, state))
     }
 
     pub fn new(file_idx: u64, ptr: StrongPtr) -> LogEntryKeep {
@@ -574,22 +558,18 @@ impl PartialEq for LogEntryStrong {
     }
 }
 
-pub fn get_ptr<F: RWS>(
-    file_idx: u64,
-    m: &mut HashItems<LogEntry>,
-    f: &mut LogFile<F>,
-) -> StrongPtr {
+pub fn get_ptr<F: RWS>(file_idx: u64, state: &mut LogState<F>) -> StrongPtr {
     // check the map
-    match m.get(file_idx) {
+    match state.m.get(file_idx) {
         Some(entry) => Rc::clone(entry),
         None => {
             // the entry must be loaded from the file
             debug!("load from disk at idx {}", file_idx);
             let entry = Rc::new(RefCell::new(
-                LogEntry::from_file(file_idx, m, f).expect("unable to load entry from file"),
+                LogEntry::from_file(file_idx, state).expect("unable to load entry from file"),
             ));
             let ptr = Rc::clone(&entry);
-            if m.store_from_disk(file_idx, entry).is_some() {
+            if state.m.store_from_disk(file_idx, entry).is_some() {
                 panic!("found unexpected entry at file index");
             }
             ptr
@@ -598,6 +578,7 @@ pub fn get_ptr<F: RWS>(
 }
 
 impl LogEntryStrong {
+    #[inline(always)]
     pub fn new(ptr: StrongPtr, file_idx: u64) -> LogEntryStrong {
         LogEntryStrong {
             file_idx,
@@ -605,6 +586,7 @@ impl LogEntryStrong {
         }
     }
 
+    #[inline(always)]
     pub fn from_file_idx(file_idx: u64) -> LogEntryStrong {
         LogEntryStrong {
             file_idx,
@@ -612,10 +594,12 @@ impl LogEntryStrong {
         }
     }
 
+    #[inline(always)]
     pub fn get_ptr_in_memory(&self) -> Option<&StrongPtr> {
         self.ptr.as_ref()
     }
 
+    #[inline(always)]
     fn drop_ptr(&mut self) -> Result<StrongPtr> {
         if let Some(ptr) = self.ptr.take() {
             return Ok(ptr);
@@ -623,40 +607,32 @@ impl LogEntryStrong {
         Err(LogError::OpAlreadyDropped)
     }
 
-    pub fn log_entry_keep<F: RWS>(
-        &mut self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> LogEntryKeep {
+    #[inline(always)]
+    pub fn log_entry_keep<F: RWS>(&mut self, state: &mut LogState<F>) -> LogEntryKeep {
         LogEntryKeep {
             file_idx: self.file_idx,
-            ptr: Some(self.get_ptr(m, f)),
+            ptr: Some(self.get_ptr(state)),
         }
     }
 
-    pub fn strong_ptr_idx<F: RWS>(
-        &mut self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> StrongPtrIdx {
+    #[inline(always)]
+    pub fn strong_ptr_idx<F: RWS>(&mut self, state: &mut LogState<F>) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
-            ptr: self.get_ptr(m, f),
+            ptr: self.get_ptr(state),
         }
     }
 
-    pub fn get_ptr<F: RWS>(
-        &mut self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> StrongPtr {
+    #[inline(always)]
+    pub fn get_ptr<F: RWS>(&mut self, state: &mut LogState<F>) -> StrongPtr {
         if self.ptr.is_none() {
-            self.ptr = Some(get_ptr(self.file_idx, m, f));
+            self.ptr = Some(get_ptr(self.file_idx, state));
         }
         Rc::clone(self.ptr.as_ref().unwrap())
     }
 
     // panics if the entry is not in memory
+    #[inline(always)]
     pub fn clone_strong_expect_exists(&self) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
@@ -686,6 +662,7 @@ impl Debug for LogEntryStrong {
 }
 
 impl Default for LogEntryStrong {
+    #[inline(always)]
     fn default() -> Self {
         LogEntryStrong {
             file_idx: 0,
@@ -762,32 +739,24 @@ impl LogEntryWeak {
         }
     }
 
-    fn as_log_entry_strong<F: RWS>(
-        &self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> LogEntryStrong {
+    fn as_log_entry_strong<F: RWS>(&self, state: &mut LogState<F>) -> LogEntryStrong {
         LogEntryStrong {
             file_idx: self.file_idx,
-            ptr: Some(self.get_ptr(m, f)),
+            ptr: Some(self.get_ptr(state)),
         }
     }
 
-    pub fn to_strong_ptr_idx<F: RWS>(
-        &self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> StrongPtrIdx {
+    pub fn to_strong_ptr_idx<F: RWS>(&self, state: &mut LogState<F>) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
-            ptr: self.get_ptr(m, f),
+            ptr: self.get_ptr(state),
         }
     }
 
-    pub fn get_ptr<F: RWS>(&self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) -> StrongPtr {
+    pub fn get_ptr<F: RWS>(&self, state: &mut LogState<F>) -> StrongPtr {
         self.ptr
             .upgrade()
-            .unwrap_or_else(|| get_ptr(self.file_idx, m, f))
+            .unwrap_or_else(|| get_ptr(self.file_idx, state))
     }
 
     // Returns the object at the next pointer only if it is already in memory
@@ -879,24 +848,16 @@ impl LogPointers {
         }
     }
 
-    pub fn get_prev<F: RWS>(
-        &mut self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Option<StrongPtr> {
-        self.prev_entry.as_mut().map(|entry| entry.get_ptr(m, f))
+    pub fn get_prev<F: RWS>(&mut self, state: &mut LogState<F>) -> Option<StrongPtr> {
+        self.prev_entry.as_mut().map(|entry| entry.get_ptr(state))
     }
 
     pub fn get_prev_strong(&self) -> Option<LogEntryStrong> {
         self.prev_entry.clone()
     }
 
-    pub fn get_next<F: RWS>(
-        &self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Option<StrongPtr> {
-        self.next_entry.as_ref().map(|entry| entry.get_ptr(m, f))
+    pub fn get_next<F: RWS>(&self, state: &mut LogState<F>) -> Option<StrongPtr> {
+        self.next_entry.as_ref().map(|entry| entry.get_ptr(state))
     }
 
     pub fn get_next_strong(&self) -> Option<LogEntryStrong> {
@@ -1048,9 +1009,9 @@ pub struct SpResult {
 }
 
 impl OuterSp {
-    pub fn finish_deserialize<F: RWS>(&mut self, m: &mut HashItems<LogEntry>, f: &mut LogFile<F>) {
+    pub fn finish_deserialize<F: RWS>(&mut self, state: &mut LogState<F>) {
         for nxt in self.not_included_ops.iter_mut() {
-            nxt.load_pointer(m, f);
+            nxt.load_pointer(state);
         }
     }
 
@@ -1063,8 +1024,7 @@ impl OuterSp {
         &'a self,
         late_include: Option<Vec<StrongPtrIdx>>,
         first_op: Option<LogEntryWeak>,
-        m: &'a mut HashItems<LogEntry>,
-        f: &'a mut LogFile<F>,
+        state: &'a mut LogState<F>,
     ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>> {
         let merge_fn = |x: &StrongPtrIdx, y: &StrongPtrIdx| {
             x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
@@ -1072,7 +1032,7 @@ impl OuterSp {
         // not_included_iter are the items before self.last_op that were not included
         // log_iter are the items that have larger time and are later in the log than self.last_op
         // late_include are the items after self.last_op in the log that arrived late
-        let (not_included_iter, log_iter) = self.get_iters(first_op, m, f)?;
+        let (not_included_iter, log_iter) = self.get_iters(first_op, state)?;
         match late_include {
             Some(late) => {
                 let iter = not_included_iter
@@ -1095,8 +1055,7 @@ impl OuterSp {
         last_op: StrongPtrIdx,
         exact: I,
         extra_info: J,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
     ) -> impl Iterator<Item = StrongPtrIdx>
     where
         I: Iterator<Item = EntryInfo>,
@@ -1116,7 +1075,7 @@ impl OuterSp {
             Some(late_min) => {
                 // go backwards until late_min is reached collecting the items, sorting them
                 // and filtering only the ones that are part of exact or extra_info
-                let mut entries: Vec<_> = total_order_iterator(&last_op.into(), false, m, f)
+                let mut entries: Vec<_> = total_order_iterator(&last_op.into(), false, state)
                     .take_while(|nxt| {
                         let nxt_entry = nxt.ptr.borrow().entry.get_entry_info();
                         println!("going back nxt time {:?} min {:?}", nxt_entry, late_min);
@@ -1137,8 +1096,7 @@ impl OuterSp {
         new_sp: SpState,
         exact: &[EntryInfo],
         first_op: Option<LogEntryWeak>,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
         // where to start the iterator from
         println!(
@@ -1147,7 +1105,7 @@ impl OuterSp {
             new_sp.sp.additional_ops,
             self.last_op
                 .as_ref()
-                .map(|e| e.get_ptr(m, f).borrow().entry.get_entry_info()),
+                .map(|e| e.get_ptr(state).borrow().entry.get_entry_info()),
             self.not_included_ops
                 .iter()
                 .map(|op| op.get_ptr().borrow().entry.get_entry_info())
@@ -1158,10 +1116,10 @@ impl OuterSp {
         // create a total order iterator over the operations including the unused items from the previous
         // SP that takes the exact set from exact, and returns the rest as unused, until last_op
         let extra_info = new_sp.sp.additional_ops.iter().cloned();
-        let last_op = self.get_last_op(first_op.clone(), m, f)?;
-        let early_ops = self.get_early_ops(last_op, exact.iter().cloned(), extra_info, m, f);
+        let last_op = self.get_last_op(first_op.clone(), state)?;
+        let early_ops = self.get_early_ops(last_op, exact.iter().cloned(), extra_info, state);
 
-        let (not_included_iter, log_iter) = self.get_iters(first_op, m, f)?;
+        let (not_included_iter, log_iter) = self.get_iters(first_op, state)?;
         let early_ops = early_ops.merge_by(not_included_iter, leq_by_entry);
         let extra_info = new_sp.sp.additional_ops.iter().cloned();
         let op_iter =
@@ -1198,8 +1156,7 @@ impl OuterSp {
         late_included: &[EntryInfo],
         not_included: K,
         first_op: Option<LogEntryWeak>,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
         // where to start the iterator from
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
@@ -1214,10 +1171,10 @@ impl OuterSp {
         );
         let not_included = not_included.into_iter();
 
-        let last_op = self.get_last_op(first_op.clone(), m, f)?;
+        let last_op = self.get_last_op(first_op.clone(), state)?;
         let extra_info = new_sp.sp.additional_ops.iter().cloned();
         let early_ops =
-            self.get_early_ops(last_op, late_included.iter().cloned(), extra_info, m, f);
+            self.get_early_ops(last_op, late_included.iter().cloned(), extra_info, state);
         let early_ops: Vec<_> = early_ops.collect();
         println!(
             "early ops {:?}",
@@ -1228,7 +1185,7 @@ impl OuterSp {
         );
         let early_ops = early_ops.into_iter();
 
-        let (not_included_iter, log_iter) = self.get_iters(first_op, m, f)?;
+        let (not_included_iter, log_iter) = self.get_iters(first_op, state)?;
         let early_ops = early_ops.merge_by(not_included_iter, leq_by_entry);
         let op_iter = total_order_check_iterator(
             early_ops,
@@ -1256,13 +1213,12 @@ impl OuterSp {
     fn get_last_op<F: RWS>(
         &self,
         first_op: Option<LogEntryWeak>,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
     ) -> Result<StrongPtrIdx> {
         let last_op = self.last_op.as_ref().or_else(|| first_op.as_ref());
         Ok(last_op
             .ok_or(LogError::PrevSpHasNoLastOp)?
-            .to_strong_ptr_idx(m, f))
+            .to_strong_ptr_idx(state))
     }
 
     /// Returns the iterators for this Sp.
@@ -1275,8 +1231,7 @@ impl OuterSp {
         &'a self,
         // late_min: Option<EntryInfo>,
         first_op: Option<LogEntryWeak>,
-        m: &'a mut HashItems<LogEntry>,
-        f: &'a mut LogFile<F>,
+        state: &'a mut LogState<F>,
     ) -> Result<(
         impl Iterator<Item = StrongPtrIdx> + 'a,
         TotalOrderAfterIter<F>,
@@ -1291,14 +1246,14 @@ impl OuterSp {
             .map(|nxt| StrongPtrIdx::new(nxt.file_idx, Rc::clone(nxt.ptr.as_ref().unwrap())));
         // items from previous sp that are earlier in the log, we need to check if these are included
         // we only want operations after the last op of the previous sp in the log
-        let last_op = self.get_last_op(first_op, m, f)?;
+        let last_op = self.get_last_op(first_op, state)?;
         let log_iter = if self.sp.sp.is_init() {
             // for the inital SP, we always start from the first op, and include all ops
-            total_order_after_all_iter(&last_op, m, f)
+            total_order_after_all_iter(&last_op, state)
         } else {
             // for later Sps we need to start from the op after last_op
             // as well as any late arrivals, which will be only included if they are referenced as being included directly
-            total_order_after_late_iter(&last_op, m, f)
+            total_order_after_late_iter(&last_op, state)
             // log_iter.next();
             // log_iter
         };
@@ -1389,25 +1344,22 @@ impl Debug for OuterSp {
     }
 }
 
-pub fn total_order_iterator<'a, F>(
+pub fn total_order_iterator<'a, F: RWS>(
     start: &LogEntryStrong,
     forward: bool,
-    m: &'a mut HashItems<LogEntry>,
-    f: &'a mut LogFile<F>,
+    state: &'a mut LogState<F>,
 ) -> TotalOrderIterator<'a, F> {
     TotalOrderIterator {
         prev_entry: Some(start.clone()),
         forward,
-        m,
-        f,
+        state,
     }
 }
 
-pub struct TotalOrderIterator<'a, F> {
+pub struct TotalOrderIterator<'a, F: RWS> {
     pub prev_entry: Option<LogEntryStrong>,
     pub forward: bool,
-    pub m: &'a mut HashItems<LogEntry>,
-    pub f: &'a mut LogFile<F>,
+    pub state: &'a mut LogState<F>,
 }
 
 impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
@@ -1416,18 +1368,18 @@ impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
     fn next(&mut self) -> Option<Self::Item> {
         let ret = match self.prev_entry.as_mut() {
             None => None,
-            Some(prv) => Some(StrongPtrIdx::new(prv.file_idx, prv.get_ptr(self.m, self.f))),
+            Some(prv) => Some(StrongPtrIdx::new(prv.file_idx, prv.get_ptr(self.state))),
         };
         self.prev_entry = match self.prev_entry.take() {
             None => None,
             Some(mut prv) => {
                 if self.forward {
-                    prv.get_ptr(self.m, self.f)
+                    prv.get_ptr(self.state)
                         .borrow()
                         .to_pointers
                         .get_next_to_strong()
                 } else {
-                    prv.get_ptr(self.m, self.f)
+                    prv.get_ptr(self.state)
                         .borrow()
                         .to_pointers
                         .get_prev_to_strong()
@@ -1442,7 +1394,7 @@ impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
 // - this will never change at the local log because any ops that arrives later will be late
 
 /// Total order iterator that only includes log entries with a larger (or equal) log index than the input.
-pub struct TotalOrderAfterIter<'a, F> {
+pub struct TotalOrderAfterIter<'a, F: RWS> {
     iter: TotalOrderIterator<'a, F>,
     min_index: LogIdx,
     min_entry: EntryInfo,
@@ -1484,15 +1436,14 @@ impl<'a, F: RWS> Iterator for TotalOrderAfterIter<'a, F> {
 pub fn total_order_after_late_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
     // late_min: Option<EntryInfo>,
-    m: &'a mut HashItems<LogEntry>,
-    f: &'a mut LogFile<F>,
+    state: &'a mut LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
     // println!("after {:?}, time {:?}", start, late_min);
     // if prev sp is not the inital SP, then we need to move forward 1 op since last op was already included in prev sp
     let min_index = start.ptr.borrow().log_index + 1;
     let min_entry = start.ptr.borrow().entry.get_entry_info();
     TotalOrderAfterIter {
-        iter: total_order_iterator(&start.into(), true, m, f),
+        iter: total_order_iterator(&start.into(), true, state),
         min_index,
         min_entry,
         include_late: true,
@@ -1502,13 +1453,12 @@ pub fn total_order_after_late_iter<'a, F: RWS>(
 
 /// Returns an total order iterator that returns items larger than start.
 /// This is the same as a total order iterator from start.
-pub fn total_order_after_all_iter<'a, F>(
+pub fn total_order_after_all_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
-    m: &'a mut HashItems<LogEntry>,
-    f: &'a mut LogFile<F>,
+    state: &'a mut LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
     TotalOrderAfterIter {
-        iter: total_order_iterator(&start.into(), true, m, f),
+        iter: total_order_iterator(&start.into(), true, state),
         min_index: 0,
         min_entry: start.ptr.borrow().entry.get_entry_info(),
         include_late: true,
@@ -1517,13 +1467,12 @@ pub fn total_order_after_all_iter<'a, F>(
 }
 
 /// Returns an total order iterator that returns start and items larger than start AND are after start in the log.
-pub fn total_order_after_iter<'a, F>(
+pub fn total_order_after_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
-    m: &'a mut HashItems<LogEntry>,
-    f: &'a mut LogFile<F>,
+    state: &'a mut LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
     TotalOrderAfterIter {
-        iter: total_order_iterator(&start.into(), true, m, f),
+        iter: total_order_iterator(&start.into(), true, state),
         min_index: start.ptr.borrow().log_index,
         min_entry: start.ptr.borrow().entry.get_entry_info(),
         include_late: false,
@@ -1895,7 +1844,7 @@ where
 }
 
 /// Used to iterate the Ops in the log in the order entries were added to the log.
-pub struct LogOpIterator<'a, F>(LogIterator<'a, F>);
+pub struct LogOpIterator<'a, F: RWS>(LogIterator<'a, F>);
 
 impl<'a, F: RWS> LogOpIterator<'a, F> {
     /// Creates a new op iterator from a LogIterator.
@@ -1918,26 +1867,23 @@ impl<'a, F: RWS> Iterator for LogOpIterator<'a, F> {
 }
 
 /// Used to iterate the log in the order entries were added to the log.
-pub struct LogIterator<'a, F> {
+pub struct LogIterator<'a, F: RWS> {
     prv_entry: Option<StrongPtrIdx>,
-    m: &'a mut HashItems<LogEntry>,
-    f: &'a mut LogFile<F>,
+    state: &'a mut LogState<F>,
     forward: bool,
 }
 
-impl<'a, F> LogIterator<'a, F> {
+impl<'a, F: RWS> LogIterator<'a, F> {
     /// Create a new log iterator starting from (and including) prev_entry.
     /// Moves either forward or backward in the log in the order entries were added.
     pub(crate) fn new(
         prv_entry: Option<StrongPtrIdx>,
-        m: &'a mut HashItems<LogEntry>,
-        f: &'a mut LogFile<F>,
+        state: &'a mut LogState<F>,
         forward: bool,
     ) -> LogIterator<'a, F> {
         LogIterator {
             prv_entry,
-            m,
-            f,
+            state,
             forward,
         }
     }
@@ -1955,12 +1901,12 @@ impl<'a, F: RWS> Iterator for LogIterator<'a, F> {
                     prv.ptr
                         .borrow()
                         .get_next()
-                        .map(|mut entry| entry.strong_ptr_idx(self.m, self.f))
+                        .map(|mut entry| entry.strong_ptr_idx(self.state))
                 } else {
                     prv.ptr
                         .borrow()
                         .get_prev()
-                        .map(|mut entry| entry.strong_ptr_idx(self.m, self.f))
+                        .map(|mut entry| entry.strong_ptr_idx(self.state))
                 }
             }
         };
@@ -1977,6 +1923,7 @@ mod tests {
     use crate::{
         file_sr::FileSR,
         log::{
+            basic_log::LogState,
             hash_items::HashItems,
             log_file::open_log_file,
             log_file::LogFile,
@@ -2066,8 +2013,7 @@ mod tests {
     fn make_outer_sp<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
         prev_sp: Option<&LogEntryKeep>,
         last_op: Option<&LogEntryKeep>,
         not_included_ops: Vec<LogEntryKeep>,
@@ -2096,7 +2042,7 @@ mod tests {
                 .map(|op| op.get_ptr().borrow().entry.get_entry_info().hash),
             vec![],
             prev_sp_info,
-            f.serialize_option(),
+            state.f.serialize_option(),
         )
         .unwrap();
         let outer_sp = OuterSp {
@@ -2108,7 +2054,7 @@ mod tests {
             supported_sp_log_index: prev_sp_log_index,
         };
         let entry = PrevEntry::Sp(outer_sp);
-        entry.check_hash(f.serialize_option()).unwrap();
+        entry.check_hash(state.f.serialize_option()).unwrap();
         let log_entry = make_log_entry(
             entry,
             prev_sp.map(|sp| sp.get_ptr()),
@@ -2116,9 +2062,12 @@ mod tests {
             last_op.map(|op| op.get_ptr()),
             None,
         );
-        log_entry.borrow_mut().write_pointers_initial(m, f).unwrap();
-        f.seek_to(log_entry.borrow().file_index).unwrap();
-        let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, m, f).unwrap();
+        log_entry
+            .borrow_mut()
+            .write_pointers_initial(state)
+            .unwrap();
+        state.f.seek_to(log_entry.borrow().file_index).unwrap();
+        let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, state).unwrap();
         assert_eq!(*log_entry.borrow(), deser_log_entry);
         // be sure we can read the not included ops
         for (op1, op2) in log_entry
@@ -2132,7 +2081,7 @@ mod tests {
             assert_eq!(*op1.get_ptr().borrow(), *op2.get_ptr().borrow());
         }
 
-        m.clear();
+        state.m.clear();
         let file_idx = log_entry.borrow().file_index;
         LogEntryKeep {
             file_idx,
@@ -2143,33 +2092,35 @@ mod tests {
     fn make_op<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
         log_entry: StrongPtr,
         prev_to: Option<StrongPtr>,
     ) -> LogEntryKeep {
-        let op = make_outer_op(id, log_entry.borrow().log_index + 1, ti, f);
+        let op = make_outer_op(id, log_entry.borrow().log_index + 1, ti, &state.f);
         let log_entry = make_log_entry(op, prev_to.as_ref(), None, Some(&log_entry), None);
         debug!(
             "new file index {}, log index {}",
             log_entry.borrow().file_index,
             log_entry.borrow().log_index
         );
-        f.seek_to(log_entry.borrow().file_index - 8).unwrap();
-        assert!(f.check_index().at_end);
-        log_entry.borrow_mut().write_pointers_initial(m, f).unwrap();
+        state.f.seek_to(log_entry.borrow().file_index - 8).unwrap();
+        debug_assert!(state.f.check_index().at_end);
+        log_entry
+            .borrow_mut()
+            .write_pointers_initial(state)
+            .unwrap();
         debug!("entry size {}", log_entry.borrow().ser_size.unwrap());
-        f.seek_to(log_entry.borrow().file_index).unwrap();
-        let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, m, f).unwrap();
+        state.f.seek_to(log_entry.borrow().file_index).unwrap();
+        let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, state).unwrap();
         assert_eq!(*log_entry.borrow(), deser_log_entry);
         // check that the prev to next to pointer is correct
         if let Some(prv) = prev_to {
-            let deser_prev_to = LogEntry::from_file(prv.borrow().file_index, m, f).unwrap();
+            let deser_prev_to = LogEntry::from_file(prv.borrow().file_index, state).unwrap();
             assert_eq!(*prv.borrow(), deser_prev_to);
             debug!("prv after: {}, deser prv: {}", prv.borrow(), deser_prev_to)
         }
         let file_idx = log_entry.borrow().file_index;
-        m.clear();
+        state.m.clear();
         LogEntryKeep {
             file_idx,
             ptr: Some(log_entry),
@@ -2178,13 +2129,14 @@ mod tests {
 
     #[test]
     fn serialize_entry() {
-        let mut f = open_log_file("log_files/entry_log0.log", true, FileSR::new).unwrap();
+        let f = open_log_file("log_files/entry_log0.log", true, FileSR::new).unwrap();
         let mut ti = TimeTest::new();
         let id = 0;
-        let mut m = HashItems::default();
+        let m = HashItems::default();
+        let mut state = LogState { m, f };
 
         // insert the inital sp
-        let mut log_entry = make_outer_sp(id, &mut ti, &mut m, &mut f, None, None, vec![]);
+        let mut log_entry = make_outer_sp(id, &mut ti, &mut state, None, None, vec![]);
         let last_sp = log_entry.clone();
         let mut prev_to = None;
         let mut op_vec = vec![];
@@ -2193,33 +2145,30 @@ mod tests {
             log_entry = make_op(
                 id,
                 &mut ti,
-                &mut m,
-                &mut f,
+                &mut state,
                 Rc::clone(log_entry.get_ptr()),
                 prev_to,
             );
             prev_to = Some(Rc::clone(log_entry.get_ptr()));
             op_vec.push(log_entry.clone());
-            m.clear();
+            state.m.clear();
         }
         // insert an op that uses a different total order
         prev_to = Some(Rc::clone(op_vec[0].get_ptr()));
         log_entry = make_op(
             id,
             &mut ti,
-            &mut m,
-            &mut f,
+            &mut state,
             Rc::clone(log_entry.get_ptr()),
             prev_to,
         );
-        m.clear();
+        state.m.clear();
 
         // check sp deserialization that includes the ops
         make_outer_sp(
             id,
             &mut ti,
-            &mut m,
-            &mut f,
+            &mut state,
             Some(&last_sp),
             Some(&log_entry),
             op_vec,

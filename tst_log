@@ -1,0 +1,757 @@
+
+running 1 test
+test causal::causal_log::test::causal_rand ... FAILED
+
+failures:
+
+---- causal::causal_log::test::causal_rand stdout ----
+last SP: RefCell { value: LogEntry => log_index: 1, file idx: 0, prev_entry: None, next_entry: file idx (weak): 134, prev_to: None, next_to: None, entry: SP, SpState { sp: (id: 0, time: 0, support count: 0, prev sp: BasicInfo { time: 0, id: 0 }), hash: [120, 173, 152, 148] } }
+
+
+create local sp time 10000000007, last sp 1, EntryInfo { basic: BasicInfo { time: 0, id: 0 }, hash: [120, 173, 152, 148] }, last op None, not included: []
+
+is init sp true
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+add op to local sp: id 0, time 10000000007 , op: OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }
+late included []
+
+check log order sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), late included [], not included []
+
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+got creator/local support for 0, my id 0
+got sp from 0, with deps from [0], at my id 0
+
+check log order sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), late included [], not included []
+
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], extra info: [], last op None, not included: []
+
+process exact sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+got creator/local support for 0, my id 1
+got sp from 0, with deps from [0], at my id 1
+
+check log order sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+update last, prev OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, new OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, change true
+last SP: RefCell { value: LogEntry => log_index: 1, file idx: 0, prev_entry: None, next_entry: file idx (weak): 134, prev_to: None, next_to: file idx (weak): 223, entry: SP, SpState { sp: (id: 0, time: 0, support count: 0, prev sp: BasicInfo { time: 0, id: 0 }), hash: [120, 173, 152, 148] } }
+
+
+create local sp time 10000000224, last sp 1, EntryInfo { basic: BasicInfo { time: 0, id: 0 }, hash: [120, 173, 152, 148] }, last op None, not included: []
+
+is init sp true
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+add op to local sp: id 0, time 10000000224 , op: OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+add op to local sp: id 1, time 10000000224 , op: OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }
+late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+
+check log order sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+got creator/local support for 1, my id 1
+got sp from 1, with deps from [0, 1], at my id 1
+
+check log order sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+update last, prev OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, new OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, change true
+last SP: RefCell { value: LogEntry => log_index: 3, file idx: 223, prev_entry: file idx (strong): 134, Op(log_index: 2, op: (id: 0, time: 10000000001)), next_entry: file idx (weak): 368, prev_to: file idx (weak): 0, next_to: None, entry: SP, SpState { sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), hash: [127, 129, 218, 55] } }
+
+
+create local sp time 10000000219, last sp 3, EntryInfo { basic: BasicInfo { time: 10000000007, id: 0 }, hash: [127, 129, 218, 55] }, last op Some(OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }), not included: []
+
+is init sp false
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+add op to local sp: id 0, time 10000000219 , op: OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }
+late included []
+
+check log order sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), late included [], not included []
+
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+got creator/local support for 0, my id 0
+got sp from 0, with deps from [0], at my id 0
+
+check log order sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), late included [], not included []
+
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }), not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+update last, prev OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, new OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, change false
+
+process exact sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }), not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+got creator/local support for 0, my id 1
+got sp from 0, with deps from [0], at my id 1
+
+check log order sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }], not included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 2
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], extra info: [], last op None, not included: []
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+update last, prev OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, new OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, change true
+
+process exact sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+got creator/local support for 1, my id 2
+got sp from 1, with deps from [0, 1], at my id 2
+
+check log order sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+update last, prev OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, new OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, change true
+
+process exact sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+got creator/local support for 1, my id 0
+got creator/local support for 1, my id 0
+got sp from 1, with deps from [0, 1], at my id 0
+
+check log order sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], not included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+update last, prev OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, new OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, change true
+last SP: RefCell { value: LogEntry => log_index: 5, file idx: 459, prev_entry: file idx (strong): 368, Op(log_index: 4, op: (id: 0, time: 10000000213)), next_entry: file idx (weak): 616, prev_to: file idx (weak): 223, next_to: file idx (weak): 715, entry: SP, SpState { sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), hash: [179, 140, 108, 71] } }
+
+
+create local sp time 10000000441, last sp 5, EntryInfo { basic: BasicInfo { time: 10000000219, id: 0 }, hash: [179, 140, 108, 71] }, last op Some(OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }), not included: []
+
+is init sp false
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+add op to local sp: id 1, time 10000000441 , op: OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 2
+add op to local sp: id 0, time 10000000441 , op: OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }
+late included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }]
+
+check log order sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+early ops []
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 2
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+got creator/local support for 0, my id 0
+got sp from 0, with deps from [1, 0], at my id 0
+
+check log order sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+early ops []
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 2
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+
+process exact sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+got creator/local support for 0, my id 2
+got sp from 0, with deps from [0], at my id 2
+
+check log order sp: (id: 0, time: 10000000007, support count: 1, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }), not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+update last, prev OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, new OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, change false
+
+process exact sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }), not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+got sp from 0, with deps from [0], at my id 2
+
+check log order sp: (id: 0, time: 10000000219, support count: 1, prev sp: BasicInfo { time: 10000000007, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }], not included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+early ops []
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+update last, prev OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, new OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, change true
+
+process exact sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+got sp from 0, with deps from [1, 0], at my id 1
+
+check log order sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], not included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }
+early ops []
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 1
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+update last, prev OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, new OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, change true
+
+process exact sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+got sp from 0, with deps from [1, 0], at my id 2
+
+check log order sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], not included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }
+early ops []
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 1
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+update last, prev OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, new OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, change true
+last SP: RefCell { value: LogEntry => log_index: 5, file idx: 468, prev_entry: file idx (strong): 369, Op(log_index: 4, op: (id: 1, time: 10000000218)), next_entry: file idx (weak): 618, prev_to: file idx (weak): 709, next_to: file idx (weak): 963, entry: SP, SpState { sp: (id: 1, time: 10000000224, support count: 2, prev sp: BasicInfo { time: 0, id: 0 }), hash: [7, 26, 142, 221] } }
+
+
+create local sp time 10000000658, last sp 5, EntryInfo { basic: BasicInfo { time: 10000000224, id: 1 }, hash: [7, 26, 142, 221] }, last op Some(OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }), not included: []
+
+is init sp false
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 1
+add op to local sp: id 0, time 10000000658 , op: OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }
+add op to local sp: id 0, time 10000000658 , op: OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }, count 2
+add op to local sp: id 1, time 10000000658 , op: OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }
+late included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }]
+
+check log order sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), late included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }, count 2
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got creator/local support for 0, my id 1
+got creator/local support for 1, my id 1
+got sp from 1, with deps from [0, 0, 1], at my id 1
+
+check log order sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), late included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }, count 2
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }), not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+update last, prev OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, new OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, change true
+
+process exact sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }), not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got sp from 1, with deps from [0, 0, 1], at my id 2
+
+check log order sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), late included [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], not included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 0
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 1
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+update last, prev OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, new OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, change true
+
+process exact sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got creator/local support for 1, my id 0
+got creator/local support for 1, my id 0
+got creator/local support for 1, my id 0
+got sp from 1, with deps from [0, 0, 1], at my id 0
+
+check log order sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), late included [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], not included [EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }]
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] } min EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }
+early ops []
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 0
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 1
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+last SP: RefCell { value: LogEntry => log_index: 9, file idx: 963, prev_entry: file idx (strong): 872, Op(log_index: 8, op: (id: 0, time: 10000000435)), next_entry: file idx (weak): 1125, prev_to: file idx (weak): 715, next_to: file idx (weak): 1224, entry: SP, SpState { sp: (id: 0, time: 10000000441, support count: 2, prev sp: BasicInfo { time: 10000000219, id: 0 }), hash: [150, 113, 246, 180] } }
+
+
+create local sp time 10000000664, last sp 9, EntryInfo { basic: BasicInfo { time: 10000000441, id: 0 }, hash: [150, 113, 246, 180] }, last op Some(OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }), not included: []
+
+is init sp false
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 1
+add op to local sp: id 1, time 10000000664 , op: OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }
+late included [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+check log order sp: (id: 0, time: 10000000664, support count: 1, prev sp: BasicInfo { time: 10000000441, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] } min EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }
+early ops []
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got sp from 0, with deps from [1], at my id 0
+
+check log order sp: (id: 0, time: 10000000664, support count: 1, prev sp: BasicInfo { time: 10000000441, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] } min EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }
+early ops []
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 0
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+last SP: RefCell { value: LogEntry => log_index: 11, file idx: 1228, prev_entry: file idx (strong): 1129, Op(log_index: 10, op: (id: 1, time: 10000000652)), next_entry: None, prev_to: file idx (weak): 963, next_to: None, entry: SP, SpState { sp: (id: 1, time: 10000000658, support count: 3, prev sp: BasicInfo { time: 10000000224, id: 1 }), hash: [198, 137, 74, 135] } }
+
+
+create local sp time 10000000659, last sp 11, EntryInfo { basic: BasicInfo { time: 10000000658, id: 1 }, hash: [198, 137, 74, 135] }, last op Some(OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }), not included: []
+
+is init sp false
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }, count 0
+late included []
+last SP: RefCell { value: LogEntry => log_index: 1, file idx: 0, prev_entry: None, next_entry: file idx (weak): 134, prev_to: None, next_to: file idx (weak): 469, entry: SP, SpState { sp: (id: 0, time: 0, support count: 0, prev sp: BasicInfo { time: 0, id: 0 }), hash: [120, 173, 152, 148] } }
+
+
+create local sp time 10000000664, last sp 1, EntryInfo { basic: BasicInfo { time: 0, id: 0 }, hash: [120, 173, 152, 148] }, last op None, not included: []
+
+is init sp true
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+add op to local sp: id 0, time 10000000664 , op: OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+add op to local sp: id 0, time 10000000664 , op: OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+add op to local sp: id 1, time 10000000664 , op: OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 3
+add op to local sp: id 0, time 10000000664 , op: OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 4
+add op to local sp: id 1, time 10000000664 , op: OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }
+late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+check log order sp: (id: 2, time: 10000000664, support count: 5, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 3
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 4
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got creator/local support for 0, my id 2
+got creator/local support for 0, my id 2
+got creator/local support for 1, my id 2
+got sp from 2, with deps from [0, 0, 1, 0, 1], at my id 2
+got vec VecClock([1]) from 2, my id 2, mine VecClock([])
+got vec VecClock([2]) from 2, my id 2, mine VecClock([1])
+got vec VecClock([0, 1]) from 2, my id 2, mine VecClock([2])
+got vec VecClock([3]) from 2, my id 2, mine VecClock([2, 1])
+
+check log order sp: (id: 2, time: 10000000664, support count: 5, prev sp: BasicInfo { time: 0, id: 0 }), late included [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], not included []
+
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+early ops [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }]
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt to check OuterOp { log_index: 3, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 3
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 4
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+
+process exact sp: (id: 0, time: 10000000664, support count: 1, prev sp: BasicInfo { time: 10000000441, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] } min EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+nxt exact check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got creator/local support for 0, my id 1
+got sp from 0, with deps from [1], at my id 1
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+
+process exact sp: (id: 0, time: 10000000664, support count: 1, prev sp: BasicInfo { time: 10000000441, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op Some(EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }), not included: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }]
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] } min EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+nxt exact check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got sp from 0, with deps from [1], at my id 2
+got vec VecClock([0, 2]) from 0, my id 2, mine VecClock([3, 1])
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+
+process exact sp: (id: 2, time: 10000000664, support count: 5, prev sp: BasicInfo { time: 0, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: true, arrived_late: false }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: true, arrived_late: false }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: false, arrived_late: true }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: true, arrived_late: false }, count 3
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: false, arrived_late: true }, count 4
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got creator/local support for 2, my id 0
+got creator/local support for 2, my id 0
+got creator/local support for 2, my id 0
+got sp from 2, with deps from [0, 0, 1, 0, 1], at my id 0
+got vec VecClock([1]) from 2, my id 0, mine VecClock([])
+got vec VecClock([2]) from 2, my id 0, mine VecClock([1])
+got vec VecClock([0, 1]) from 2, my id 0, mine VecClock([2])
+got vec VecClock([3]) from 2, my id 0, mine VecClock([2, 1])
+got vec VecClock([0, 2]) from 2, my id 0, mine VecClock([3, 1])
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+check back insert op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+check back insert op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+
+process exact sp: (id: 2, time: 10000000664, support count: 5, prev sp: BasicInfo { time: 0, id: 0 }), ops: [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }]
+
+exact [EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }, EntryInfo { basic: BasicInfo { time: 10000000213, id: 0 }, hash: [45, 72, 231, 74] }, EntryInfo { basic: BasicInfo { time: 10000000218, id: 1 }, hash: [211, 144, 185, 211] }, EntryInfo { basic: BasicInfo { time: 10000000435, id: 0 }, hash: [141, 25, 158, 232] }, EntryInfo { basic: BasicInfo { time: 10000000652, id: 1 }, hash: [23, 223, 214, 192] }], extra info: [], last op None, not included: []
+going back nxt time EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] } min EntryInfo { basic: BasicInfo { time: 10000000001, id: 0 }, hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 2, op: OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }, include_in_hash: false, arrived_late: true }, count 0
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+nxt to check OuterOp { log_index: 6, op: OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }, include_in_hash: false, arrived_late: true }, count 1
+nxt exact check OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] }
+added op OpState { op: (id: 0, time: 10000000001), hash: [115, 20, 208, 205] } to Sp during log order check
+nxt to check OuterOp { log_index: 4, op: OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }, include_in_hash: true, arrived_late: false }, count 2
+nxt exact check OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] }
+added op OpState { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74] } to Sp during log order check
+nxt to check OuterOp { log_index: 8, op: OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }, include_in_hash: false, arrived_late: true }, count 3
+nxt exact check OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] }
+added op OpState { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211] } to Sp during log order check
+nxt to check OuterOp { log_index: 10, op: OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }, include_in_hash: true, arrived_late: false }, count 4
+nxt exact check OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] }
+added op OpState { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232] } to Sp during log order check
+nxt exact check OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] }
+added op OpState { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192] } to Sp during log order check
+got creator/local support for 2, my id 1
+got creator/local support for 2, my id 1
+got sp from 2, with deps from [0, 0, 1, 0, 1], at my id 1
+got vec VecClock([1]) from 2, my id 1, mine VecClock([])
+vec: []
+vec: [(4, Op(PendingOp { supporters: SupVec { s: [false, true, true, false, false, false], count: 2 }, data: OpEntryInfo { op: (id: 1, time: 10000000218), hash: [211, 144, 185, 211], log_index: 4 }, dependent_sps: None, support: SupportInfo { local_supported: true, creator_supported: true } })), (5, Completed), (6, Op(PendingOp { supporters: SupVec { s: [true, true, true, false, false, false], count: 3 }, data: OpEntryInfo { op: (id: 0, time: 10000000213), hash: [45, 72, 231, 74], log_index: 6 }, dependent_sps: None, support: SupportInfo { local_supported: true, creator_supported: true } })), (7, Completed), (8, Op(PendingOp { supporters: SupVec { s: [true, true, true, false, false, false], count: 3 }, data: OpEntryInfo { op: (id: 0, time: 10000000435), hash: [141, 25, 158, 232], log_index: 8 }, dependent_sps: None, support: SupportInfo { local_supported: true, creator_supported: true } })), (9, Completed), (10, Op(PendingOp { supporters: SupVec { s: [true, true, true, false, false, false], count: 3 }, data: OpEntryInfo { op: (id: 1, time: 10000000652), hash: [23, 223, 214, 192], log_index: 10 }, dependent_sps: None, support: SupportInfo { local_supported: true, creator_supported: true } })), (11, Completed), (12, Completed), (13, Completed)]
+thread 'causal::causal_log::test::causal_rand' panicked at 'assertion failed: `(left == right)`
+  left: `VecClock([3, 2])`,
+ right: `VecClock([1])`', src/causal/causal_log.rs:1115:17
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    causal::causal_log::test::causal_rand
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out
+

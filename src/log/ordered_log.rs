@@ -481,3 +481,64 @@ impl<S: Supporters> PendingOp<S> {
         new_id
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DepBTree, DepHSet, DepVec, Dependents, SupBTree, SupHSet, SupVec, Supporters};
+
+    fn supporters<S: Supporters>(mut s: S) {
+        assert_eq!(0, s.get_count());
+        for i in 1..=100 {
+            assert!(s.add_id(i));
+            assert!(!s.add_id(i));
+            assert_eq!(i as usize, s.get_count());
+        }
+    }
+
+    #[test]
+    fn supporters_btree() {
+        supporters(SupBTree::default());
+    }
+
+    #[test]
+    fn supporters_vec() {
+        supporters(SupVec::default());
+    }
+    #[test]
+    fn supporters_hmap() {
+        supporters(SupHSet::default());
+    }
+
+    fn dependents<D: Dependents>(mut d: D) {
+        // fn add_ids<I: Iterator<Item = LogIdx>>(&mut self, i: I);
+        // fn add_id(&mut self, idx: LogIdx);
+        // fn got_support(&mut self, idx: LogIdx) -> bool;
+        // fn remaining_idxs(&self) -> usize;
+        assert_eq!(0, d.remaining_idxs());
+        d.add_idxs(0..100);
+        assert_eq!(100, d.remaining_idxs());
+        for i in 100..200 {
+            d.add_idx(i);
+        }
+        for i in 0..200 {
+            assert!(d.got_support(i));
+            assert!(!d.got_support(i));
+            assert_eq!(199 - i as usize, d.remaining_idxs());
+        }
+        assert_eq!(0, d.remaining_idxs());
+    }
+
+    #[test]
+    fn dependents_btree() {
+        dependents(DepBTree::default());
+    }
+
+    #[test]
+    fn dependents_vec() {
+        dependents(DepVec::default());
+    }
+    #[test]
+    fn dependents_hset() {
+        dependents(DepHSet::default());
+    }
+}

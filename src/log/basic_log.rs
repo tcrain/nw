@@ -1,3 +1,4 @@
+use bincode::DefaultOptions;
 use log::debug;
 use std::cell::{Ref, RefCell};
 use std::ops::Deref;
@@ -41,10 +42,9 @@ impl<'a> Deref for PrevEntryHolder<'a> {
 }
 
 // Iterates the SP entries in log order by decreasing times
-struct SpIterator<'a, F> {
+struct SpIterator<'a, F: RWS> {
     prev_entry: Option<LogEntryStrong>,
-    m: &'a mut HashItems<LogEntry>,
-    f: &'a mut LogFile<F>,
+    state: &'a mut LogState<F>,
 }
 
 impl<'a, F: RWS> Iterator for SpIterator<'a, F> {
@@ -53,22 +53,17 @@ impl<'a, F: RWS> Iterator for SpIterator<'a, F> {
     fn next(&mut self) -> Option<Self::Item> {
         let ret = match self.prev_entry.as_mut() {
             None => None,
-            Some(prv) => Some(StrongPtrIdx::new(prv.file_idx, prv.get_ptr(self.m, self.f))),
+            Some(prv) => Some(StrongPtrIdx::new(prv.file_idx, prv.get_ptr(self.state))),
         };
         self.prev_entry = match self.prev_entry.take() {
             None => None,
-            Some(mut prv) => prv
-                .get_ptr(self.m, self.f)
-                .borrow()
-                .entry
-                .as_sp()
-                .get_prev_sp(),
+            Some(mut prv) => prv.get_ptr(self.state).borrow().entry.as_sp().get_prev_sp(),
         };
         ret
     }
 }
 
-struct SpLocalTotalOrderIterator<'a, F> {
+struct SpLocalTotalOrderIterator<'a, F: RWS> {
     id: Id,
     iter: TotalOrderIterator<'a, F>,
 }
@@ -96,11 +91,7 @@ enum LogItems {
 
 impl LogItems {
     // drops the first item in the log and returns the item dropped
-    fn drop_first<F: RWS>(
-        &mut self,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
-    ) -> Result<StrongPtrIdx> {
+    fn drop_first<F: RWS>(&mut self, state: &mut LogState<F>) -> Result<StrongPtrIdx> {
         let entry = match self {
             LogItems::Empty => return Err(LogError::EmptyLogError),
             LogItems::Single(_) => return Err(LogError::SingleItemLog),
@@ -111,7 +102,7 @@ impl LogItems {
                 let prev = mi.first_entry.clone();
                 // let to_drop = mi.first_entry.clone_strong();
                 if let Some(mut entry) = nxt.take() {
-                    mi.first_entry = entry.strong_ptr_idx(m, f); // if there is a next entry, then we set that as the first
+                    mi.first_entry = entry.strong_ptr_idx(state); // if there is a next entry, then we set that as the first
                     drop_entry(&prev)?;
                     prev
                 } else {
@@ -136,19 +127,14 @@ impl LogItems {
         Ok(entry)
     }
 
-    fn log_iterator_from_end<'a, F>(
-        &self,
-        m: &'a mut HashItems<LogEntry>,
-        f: &'a mut LogFile<F>,
-    ) -> LogIterator<'a, F> {
+    fn log_iterator_from_end<'a, F: RWS>(&self, state: &'a mut LogState<F>) -> LogIterator<'a, F> {
         LogIterator::new(
             match self {
                 LogItems::Empty => None,
                 LogItems::Single(si) => Some(si.entry.clone()), // ::clone( &si.entry)),
                 LogItems::Multiple(mi) => Some(mi.last_entry.clone()), //::clone( &mi.last_entry))
             },
-            m,
-            f,
+            state,
             false,
         )
     }
@@ -158,8 +144,7 @@ impl LogItems {
         idx: u64,
         file_idx: u64,
         entry: PrevEntry,
-        m: &mut HashItems<LogEntry>,
-        f: &mut LogFile<F>,
+        state: &mut LogState<F>,
     ) -> StrongPtrIdx {
         let prv = match self {
             LogItems::Empty => None,
@@ -209,10 +194,10 @@ impl LogItems {
                 lm.last_entry = new_entry_keep.clone();
             }
         }
-        if let (_, Some(replaced)) = m.store_recent(file_idx, new_entry) {
+        if let (_, Some(replaced)) = state.m.store_recent(file_idx, new_entry) {
             // the oldest entry was removed from the map, so unlink it form the list so it can be GC'd
             let itm = self
-                .drop_first(m, f)
+                .drop_first(state)
                 .expect("expected to removed from multiple");
             debug_assert_eq!(replaced, itm.file_idx);
         }
@@ -258,6 +243,10 @@ pub struct Log<F: RWS> {
     // set_initial_sp_op: bool,
     init_sp_entry_info: EntryInfo,
     // max_entries: u64, // maximum number of entries to keep in the log
+    state: LogState<F>,
+}
+
+pub struct LogState<F: RWS> {
     pub f: LogFile<F>,
     pub m: HashItems<LogEntry>, // log entries in memory by their log file index
 }
@@ -282,13 +271,18 @@ impl<F: RWS> Log<F> {
             first_op_to: None,
             // set_initial_sp_op: false,
             init_sp_entry_info: EntryInfo::default(),
-            f: log_file,
-            m: HashItems::default(),
+            state: LogState {
+                f: log_file,
+                m: HashItems::default(),
+            },
         };
         // insert the initial sp
         let init_sp = OuterSp {
-            sp: SpState::from_sp(Sp::get_init(l.get_init_support()), l.f.serialize_option())
-                .unwrap(),
+            sp: SpState::from_sp(
+                Sp::get_init(l.get_init_support()),
+                l.state.f.serialize_option(),
+            )
+            .unwrap(),
             last_op: None,
             not_included_ops: vec![],
             late_included: vec![],
@@ -302,6 +296,16 @@ impl<F: RWS> Log<F> {
         // l.m.insert(0, Rc::clone(&outer_sp.ptr));
         l.init_sp = Some((&outer_sp).into());
         l
+    }
+
+    #[inline(always)]
+    pub fn serialize_option(&self) -> DefaultOptions {
+        self.state.f.serialize_option()
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_log_state_mut(&mut self) -> &mut LogState<F> {
+        &mut self.state
     }
 
     fn get_init_support(&self) -> EntryInfo {
@@ -405,30 +409,7 @@ impl<F: RWS> Log<F> {
     }
 
     fn drop_first(&mut self) -> Result<StrongPtrIdx> {
-        self.first_last.drop_first(&mut self.m, &mut self.f)
-        /* match self.first_last.drop_first() {
-            Err(e) => Err(e),
-            Ok(first) => {
-                // if the dropped value was the last op, then the last op/sp pointer must be updated
-                // (this is needed because the total order of ops/sps may be in a differnt order than the log)
-                let first_ptr = first.get_ptr();
-                match first_ptr.borrow().entry {
-                    PrevEntry::Op(_) => {
-                        let last_op = self.last_op_total_order.as_ref().unwrap().get_ptr();
-                        if Rc::ptr_eq(&last_op, &first_ptr) {
-                            self.last_op_total_order = prev_entry_strong_to_weak(last_op.borrow().to_pointers.get_prev_to_strong());
-                        }
-                    },
-                    PrevEntry::Sp(_) => {
-                        let last_sp = self.last_sp_total_order.as_ref().unwrap().get_ptr();
-                        if Rc::ptr_eq(&last_sp, &first_ptr) {
-                            self.last_sp_total_order = prev_entry_strong_to_weak(last_sp.borrow().to_pointers.get_prev_to_strong());
-                        }
-                    }
-                }
-                Ok(first)
-            }
-        }*/
+        self.first_last.drop_first(&mut self.state)
     }
 
     fn sp_local_total_order_iterator(&mut self, id: Id) -> SpLocalTotalOrderIterator<F> {
@@ -442,8 +423,7 @@ impl<F: RWS> Log<F> {
         TotalOrderIterator {
             prev_entry: Some(sp),
             forward: false,
-            m: &mut self.m,
-            f: &mut self.f,
+            state: &mut self.state,
         }
     }
 
@@ -454,8 +434,7 @@ impl<F: RWS> Log<F> {
                 Some(prv) => Some(prv.into()),
             },
             forward: false,
-            m: &mut self.m,
-            f: &mut self.f,
+            state: &mut self.state,
         }
     }
 
@@ -466,8 +445,7 @@ impl<F: RWS> Log<F> {
                 None => None,
                 Some(prv) => Some(prv.into()),
             },
-            m: &mut self.m,
-            f: &mut self.f,
+            state: &mut self.state,
         }
     }
 
@@ -478,8 +456,7 @@ impl<F: RWS> Log<F> {
                 Some(prv) => Some(prv.into()),
             },
             forward: false,
-            m: &mut self.m,
-            f: &mut self.f,
+            state: &mut self.state,
         }
     }
 
@@ -490,8 +467,7 @@ impl<F: RWS> Log<F> {
                 Some((idx, _)) => Some(LogEntryStrong::from_file_idx(*idx)),
             },
             forward: true,
-            m: &mut self.m,
-            f: &mut self.f,
+            state: &mut self.state,
         }
     }
 
@@ -505,15 +481,12 @@ impl<F: RWS> Log<F> {
     }
 
     fn log_iterator_from(&mut self, mut entry: LogEntryStrong, forward: bool) -> LogIterator<F> {
-        let m = &mut self.m;
-        let f = &mut self.f;
-        let prv_entry = Some(entry.strong_ptr_idx(m, f));
-        LogIterator::new(prv_entry, m, f, forward)
+        let prv_entry = Some(entry.strong_ptr_idx(&mut self.state));
+        LogIterator::new(prv_entry, &mut self.state, forward)
     }
 
     fn log_iterator_from_end(&mut self) -> LogIterator<F> {
-        self.first_last
-            .log_iterator_from_end(&mut self.m, &mut self.f)
+        self.first_last.log_iterator_from_end(&mut self.state)
     }
 
     pub fn check_sp<T>(
@@ -528,7 +501,7 @@ impl<F: RWS> Log<F> {
     {
         sp.validate(&self.init_sp_entry_info.hash, ti)?;
         let sp_supported_info = sp.supported_sp_info;
-        let sp_state = SpState::from_sp(sp, &mut self.f.serialize_option())?;
+        let sp_state = SpState::from_sp(sp, &mut self.state.f.serialize_option())?;
         let sp_ref = self
             .find_sp(sp_supported_info, Some(sp_state.get_entry_info()))?
             .ptr;
@@ -540,8 +513,7 @@ impl<F: RWS> Log<F> {
             &late_included,
             not_included.iter().cloned(),
             self.get_first_op(),
-            &mut self.m,
-            &mut self.f,
+            &mut self.state,
         )
     }
 
@@ -575,8 +547,7 @@ impl<F: RWS> Log<F> {
                 &late_included,
                 not_included,
                 self.get_first_op(),
-                &mut self.m,
-                &mut self.f,
+                &mut self.state,
             )
             .expect("must be able to generate SP for entry already created");
         Ok(ret)
@@ -593,7 +564,7 @@ impl<F: RWS> Log<F> {
     {
         sp.validate(&self.init_sp_entry_info.hash, ti)?;
         let sp_supported_info = sp.supported_sp_info;
-        let sp_state = SpState::from_sp(sp, &mut self.f.serialize_option())?;
+        let sp_state = SpState::from_sp(sp, &mut self.state.f.serialize_option())?;
         let sp_ref = self
             .find_sp(sp_supported_info, Some(sp_state.get_entry_info()))?
             .ptr;
@@ -604,14 +575,13 @@ impl<F: RWS> Log<F> {
             sp_state,
             exact,
             self.get_first_op(),
-            &mut self.m,
-            &mut self.f,
+            &mut self.state,
         )
     }
 
     fn add_to_log(&mut self, entry: PrevEntry) -> StrongPtrIdx {
         self.index += 1;
-        let mut file_index = self.f.get_end_index();
+        let mut file_index = self.state.f.get_end_index();
         // file_index is where the item will be written in the file, it is the end + 8, since we have
         // not yet written the total order pointer of the previous entry
         if self.index > 1 {
@@ -620,7 +590,7 @@ impl<F: RWS> Log<F> {
         debug!("inserting log index {}", self.index);
         // add the item to the log
         self.first_last
-            .add_item(self.index, file_index, entry, &mut self.m, &mut self.f)
+            .add_item(self.index, file_index, entry, &mut self.state)
     }
 
     pub fn insert_outer_sp(&mut self, sp: OuterSp) -> Result<StrongPtrIdx> {
@@ -631,7 +601,7 @@ impl<F: RWS> Log<F> {
         let mut last = None;
         for nxt in self.sp_total_order_iterator() {
             if nxt.ptr.borrow().entry.as_sp().sp < new_sp_ref.ptr.borrow().entry.as_sp().sp {
-                set_next_total_order(&nxt, &new_sp_ref, &mut self.m, &mut self.f);
+                set_next_total_order(&nxt, &new_sp_ref, &mut self.state);
                 last = None;
                 break;
             } else {
@@ -640,19 +610,14 @@ impl<F: RWS> Log<F> {
         }
         // if last != None then we are at the begginning of the list, so we must update the new sp next pointer
         if let Some(last_sp) = last {
-            set_next_total_order(&new_sp_ref, &last_sp, &mut self.m, &mut self.f);
+            set_next_total_order(&new_sp_ref, &last_sp, &mut self.state);
         }
 
         // update the last sp total order pointer if necessary
         self.last_sp_total_order = match self.last_sp_total_order.take() {
             None => Some((&new_sp_ref).into()),
             Some(last) => {
-                if last
-                    .get_ptr(&mut self.m, &mut self.f)
-                    .borrow()
-                    .entry
-                    .as_sp()
-                    .sp
+                if last.get_ptr(&mut self.state).borrow().entry.as_sp().sp
                     < new_sp_ref.ptr.borrow().entry.as_sp().sp
                 {
                     Some((&new_sp_ref).into())
@@ -663,7 +628,7 @@ impl<F: RWS> Log<F> {
         };
         // update the sp log order pointer
         let last_sp_op = match self.last_sp.as_ref() {
-            Some(last_sp) => Some(last_sp.to_strong_ptr_idx(&mut self.m, &mut self.f)),
+            Some(last_sp) => Some(last_sp.to_strong_ptr_idx(&mut self.state)),
             None => None,
         };
         // update the sp log order pointers
@@ -675,7 +640,7 @@ impl<F: RWS> Log<F> {
         new_sp_ref
             .ptr
             .borrow_mut()
-            .write_pointers_initial(&mut self.m, &mut self.f)?;
+            .write_pointers_initial(&mut self.state)?;
         Ok(new_sp_ref)
     }
 
@@ -690,7 +655,7 @@ impl<F: RWS> Log<F> {
             include_in_hash,
             arrived_late,
         } = ti.arrived_time_check(op.info.time);
-        let op_state = OpState::from_op(op, self.f.serialize_option())?;
+        let op_state = OpState::from_op(op, self.state.f.serialize_option())?;
         // compute the location of the operation in the total order of the log
         // if the operations is before the first operation in the log, first_op will not be none
         let mut first_op = None;
@@ -733,7 +698,7 @@ impl<F: RWS> Log<F> {
         let new_op_ref = self.add_to_log(outer_op);
         // add the op to the total order of the log
         if let Some(prv) = prev {
-            set_next_total_order(&prv, &new_op_ref, &mut self.m, &mut self.f);
+            set_next_total_order(&prv, &new_op_ref, &mut self.state);
         }
 
         // see if need to set the op as the first op in the log
@@ -747,7 +712,7 @@ impl<F: RWS> Log<F> {
         }
         // if last != None then we are at the begginning of the list, so we must update the new op next pointer
         if let Some(last_op) = first_op {
-            set_next_total_order(&new_op_ref, &last_op, &mut self.m, &mut self.f);
+            set_next_total_order(&new_op_ref, &last_op, &mut self.state);
         }
 
         // update the last op pointer if necessary
@@ -756,26 +721,13 @@ impl<F: RWS> Log<F> {
             Some(last) => {
                 println!(
                     "update last, prev {:?}, new {:?}, change {}",
-                    last.get_ptr(&mut self.m, &mut self.f)
-                        .borrow()
-                        .entry
-                        .as_op()
-                        .op,
+                    last.get_ptr(&mut self.state).borrow().entry.as_op().op,
                     new_op_ref.ptr.borrow().entry.as_op().op,
-                    last.get_ptr(&mut self.m, &mut self.f)
-                        .borrow()
-                        .entry
-                        .as_op()
-                        .op
+                    last.get_ptr(&mut self.state).borrow().entry.as_op().op
                         < new_op_ref.ptr.borrow().entry.as_op().op
                 );
 
-                if last
-                    .get_ptr(&mut self.m, &mut self.f)
-                    .borrow()
-                    .entry
-                    .as_op()
-                    .op
+                if last.get_ptr(&mut self.state).borrow().entry.as_op().op
                     < new_op_ref.ptr.borrow().entry.as_op().op
                 {
                     Some((&new_op_ref).into())
@@ -789,7 +741,7 @@ impl<F: RWS> Log<F> {
         new_op_ref
             .ptr
             .borrow_mut()
-            .write_pointers_initial(&mut self.m, &mut self.f)
+            .write_pointers_initial(&mut self.state)
             .unwrap();
         Ok(new_op_ref)
     }
@@ -861,8 +813,7 @@ pub mod test_fns {
                             sp_state,
                             &exact,
                             l.get_first_op(),
-                            &mut l.m,
-                            &mut l.f,
+                            &mut l.state,
                         )
                         .unwrap();
                 }
@@ -1030,7 +981,7 @@ pub(crate) mod tests {
             entry_infos.push(op.ptr.as_ref().borrow().entry.get_entry_info());
         }
         // clear the memory map so we dont have extra references
-        l.m.clear();
+        l.get_log_state_mut().m.clear();
         // drop initial sp and each op
         for _ in 0..op_count {
             let entry = {
@@ -1069,9 +1020,9 @@ pub(crate) mod tests {
     fn op_iterator() {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(3));
-        let op1 = OpState::new(1, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
-        let op2 = OpState::new(2, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
-        let op3 = OpState::new(3, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op1 = OpState::new(1, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
+        let op2 = OpState::new(2, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
+        let op3 = OpState::new(3, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let op1_clone = op1.clone();
         let op2_clone = op2.clone();
         let op3_clone = op3.clone();
@@ -1098,7 +1049,7 @@ pub(crate) mod tests {
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
             );
             assert!(iter.next().is_none());
-            let mut iter = total_order_iterator(&(&first_entry).into(), true, &mut l.m, &mut l.f);
+            let mut iter = total_order_iterator(&(&first_entry).into(), true, &mut l.state);
             assert_eq!(
                 op1_clone,
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
@@ -1114,7 +1065,7 @@ pub(crate) mod tests {
             assert!(iter.next().is_none());
 
             // check using the total order iterator, but only after the index in the log
-            let mut iter = total_order_after_iter(&first_entry, &mut l.m, &mut l.f);
+            let mut iter = total_order_after_iter(&first_entry, &mut l.state);
             assert_eq!(
                 op1_clone,
                 iter.next().unwrap().ptr.as_ref().borrow().entry.as_op().op
@@ -1157,7 +1108,7 @@ pub(crate) mod tests {
                     id,
                     Rc::clone(&prev_sp),
                     &mut ti,
-                    l.f.serialize_option(),
+                    l.serialize_option(),
                 ))
                 .unwrap();
             check_log_indicies(&mut l);
@@ -1196,14 +1147,14 @@ pub(crate) mod tests {
         let mut prev_sp = l.get_initial_sp().unwrap().ptr;
         for _ in 0..num_sp {
             let new_sp = l
-                .insert_outer_sp(gen_sp(id, prev_sp, &mut ti, l.f.serialize_option()))
+                .insert_outer_sp(gen_sp(id, prev_sp, &mut ti, l.serialize_option()))
                 .unwrap();
             check_log_indicies(&mut l);
             prev_sp = Rc::clone(&new_sp.ptr);
             entry_infos.push(new_sp.ptr.as_ref().borrow().entry.get_entry_info());
         }
         // clear the memory map so we dont have extra references
-        l.m.clear();
+        l.get_log_state_mut().m.clear();
         // first drop the initial sp then the remaining sps
         for _ in 0..num_sp {
             let entry = {
@@ -1229,7 +1180,7 @@ pub(crate) mod tests {
             )
         }
         // check we can still add sps
-        l.insert_outer_sp(gen_sp(id, prev_sp, &mut ti, l.f.serialize_option()))
+        l.insert_outer_sp(gen_sp(id, prev_sp, &mut ti, l.serialize_option()))
             .unwrap();
         // be sure we have num_sp + 2 sps (+2 because of the inital log entry plus the additional one added)
         assert_eq!(num_sp + 2, l.sp_iterator_from_last().count() as u64);
@@ -1250,7 +1201,7 @@ pub(crate) mod tests {
             for i in 0..num_ids {
                 let prev_sp = get_entry_info(i, &mut l, &last_sps);
                 let new_sp = l
-                    .insert_outer_sp(gen_sp(i, prev_sp, &mut ti, l.f.serialize_option()))
+                    .insert_outer_sp(gen_sp(i, prev_sp, &mut ti, l.serialize_option()))
                     .unwrap();
                 last_sps.insert(i, new_sp.ptr);
             }
@@ -1276,13 +1227,13 @@ pub(crate) mod tests {
             iter_id,
             get_entry_info(iter_id, &mut l, &last_sps),
             &mut ti,
-            l.f.serialize_option(),
+            l.serialize_option(),
         );
         let sp2 = gen_sp(
             iter_id,
             get_entry_info(iter_id, &mut l, &last_sps),
             &mut ti,
-            l.f.serialize_option(),
+            l.serialize_option(),
         );
         let sp1_clone = sp1.sp.clone();
         let sp2_clone = sp2.sp.clone();
@@ -1370,7 +1321,7 @@ pub(crate) mod tests {
             m,
             vec![],
             l.get_initial_entry_info(),
-            l.f.serialize_option(),
+            l.serialize_option(),
         )
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
@@ -1425,15 +1376,15 @@ pub(crate) mod tests {
         let mut l = Log::new(get_log_file(8));
         let id = 0;
         let op1 = make_op_late(
-            OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap(),
-            l.f.serialize_option(),
+            OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap(),
+            l.serialize_option(),
         );
         let outer_op1 = l.insert_op(op1.op.clone(), &ti).unwrap();
         check_log_indicies(&mut l);
         assert!(outer_op1.ptr.as_ref().borrow().entry.as_op().arrived_late);
 
         // op2 will be included as normal op
-        let op2 = OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op2 = OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let outer_op2 = l.insert_op(op2.op, &ti).unwrap();
         check_log_indicies(&mut l);
         assert!(!outer_op2.ptr.as_ref().borrow().entry.as_op().arrived_late);
@@ -1527,7 +1478,7 @@ pub(crate) mod tests {
             m,
             vec![],
             l.get_initial_entry_info(),
-            l.f.serialize_option(),
+            l.serialize_option(),
         )
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
@@ -1571,14 +1522,14 @@ pub(crate) mod tests {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(10));
         let id = 0;
-        let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let sp1 = SpState::new(
             id,
             ti.now_monotonic(),
             [op1.hash].iter().cloned(),
             vec![],
             l.get_initial_entry_info(),
-            l.f.serialize_option(),
+            l.serialize_option(),
         )
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
@@ -1595,10 +1546,10 @@ pub(crate) mod tests {
         let mut ti = TimeTest::new();
         let mut l = Log::new(get_log_file(11));
         let id = 0;
-        let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap();
+        let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let op2 = make_op_late(
-            OpState::new(id, gen_rand_data(), &mut ti, l.f.serialize_option()).unwrap(),
-            l.f.serialize_option(),
+            OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap(),
+            l.serialize_option(),
         );
         l.insert_op(op2.op.clone(), &ti).unwrap();
         check_log_indicies(&mut l);
@@ -1610,7 +1561,7 @@ pub(crate) mod tests {
             [op1.hash].iter().cloned(),
             vec![],
             l.get_initial_entry_info(),
-            l.f.serialize_option(),
+            l.serialize_option(),
         )
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
@@ -1685,7 +1636,7 @@ pub(crate) mod tests {
             // we should have no more than the max entires in memory
             assert_eq!(
                 cmp::min(i + 2, DEFAULT_MAX_ENTRIES),
-                l.m.recent_entries_count() as usize
+                l.get_log_state_mut().m.recent_entries_count() as usize
             );
             entry_infos.push(op.ptr.as_ref().borrow().entry.get_entry_info());
             entries.push_back(op);

@@ -133,7 +133,7 @@ impl<F: RWS> LocalLog<F> {
         let op_ptr = op_log.ptr.borrow();
         let serialized = op_ptr
             .entry
-            .check_hash(self.l.f.serialize_option())
+            .check_hash(self.l.serialize_option())
             .expect("serialization and hash was checked in call to new_op");
         let op = op_ptr.entry.as_op();
         Ok(OpResult {
@@ -145,7 +145,7 @@ impl<F: RWS> LocalLog<F> {
 
     #[inline(always)]
     pub fn serialize_option(&self) -> DefaultOptions {
-        self.l.f.serialize_option()
+        self.l.serialize_option()
     }
 
     #[inline(always)]
@@ -158,7 +158,7 @@ impl<F: RWS> LocalLog<F> {
     where
         T: TimeInfo,
     {
-        let op = op_c.to_op(self.l.f.serialize_option())?;
+        let op = op_c.to_op(self.l.serialize_option())?;
         let op_log = self.l.insert_op(op, ti)?;
         let op_ptr = op_log.ptr.borrow();
         let op_info = op_ptr.get_op_entry_info();
@@ -175,7 +175,7 @@ impl<F: RWS> LocalLog<F> {
         ti: &mut T,
         sp_p: SpToProcess,
     ) -> Result<(SpToProcess, SpDetails)> {
-        let sp = sp_p.sp.to_sp(self.l.f.serialize_option())?;
+        let sp = sp_p.sp.to_sp(self.l.serialize_option())?;
         self.process_sp(ti, sp, &sp_p.late_included, &sp_p.not_included)
     }
 
@@ -184,7 +184,7 @@ impl<F: RWS> LocalLog<F> {
         ti: &mut T,
         sp_p: SpExactToProcess,
     ) -> Result<(SpToProcess, SpDetails)> {
-        let sp = sp_p.sp.to_sp(self.l.f.serialize_option())?;
+        let sp = sp_p.sp.to_sp(self.l.serialize_option())?;
         for op in &sp_p.exact {
             if let Err(e) = self.l.insert_op(op.op.clone(), ti) {
                 match e {
@@ -198,8 +198,8 @@ impl<F: RWS> LocalLog<F> {
     }
 
     pub fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess> {
-        let sp = sp_c.to_sp(self.l.f.serialize_option())?;
-        let sp_s = SpState::from_sp(sp, self.l.f.serialize_option())?;
+        let sp = sp_c.to_sp(self.l.serialize_option())?;
+        let sp_s = SpState::from_sp(sp, self.l.serialize_option())?;
         let (_, ops) = self.l.get_sp_exact(sp_s.get_entry_info())?;
         Ok(SpExactToProcess {
             exact: ops,
@@ -214,7 +214,7 @@ impl<F: RWS> LocalLog<F> {
     ) -> SpExactToProcess {
         let serialized = sp_ptr
             .entry
-            .check_hash(self.l.f.serialize_option())
+            .check_hash(self.l.serialize_option())
             .expect("serialization and hash was checked in call to new_op");
         SpExactToProcess {
             exact,
@@ -226,7 +226,7 @@ impl<F: RWS> LocalLog<F> {
         // let sp_ptr = sp.ptr.borrow();
         let serialized = sp_ptr
             .entry
-            .check_hash(self.l.f.serialize_option())
+            .check_hash(self.l.serialize_option())
             .expect("serialization and hash was checked in call to new_op");
         let new_sp = sp_ptr.entry.as_sp();
         let not_included = new_sp
@@ -326,7 +326,7 @@ impl<F: RWS> LocalLog<F> {
                 last_sp_ref.log_index,
                 last_sp_ref.entry.get_entry_info(),
                 last_sp_entry.last_op.as_ref().map(|op| op
-                    .get_ptr(&mut self.l.m, &mut self.l.f)
+                    .get_ptr(self.l.get_log_state_mut())
                     .borrow()
                     .entry
                     .as_op()
@@ -352,7 +352,7 @@ impl<F: RWS> LocalLog<F> {
                 last_sp_entry.last_op.as_ref().map(|last_op| {
                     let mut last_strong: LogEntryStrong = last_op.into();
                     let largest_op = last_strong
-                        .get_ptr(&mut self.l.m, &mut self.l.f)
+                        .get_ptr(self.l.get_log_state_mut())
                         .borrow()
                         .entry
                         .get_entry_info();
@@ -381,12 +381,7 @@ impl<F: RWS> LocalLog<F> {
                 })
             };
             let op_iter = last_sp_entry
-                .get_ops_after_iter(
-                    after_ops,
-                    self.l.get_first_op(),
-                    &mut self.l.m,
-                    &mut self.l.f,
-                )?
+                .get_ops_after_iter(after_ops, self.l.get_first_op(), self.l.get_log_state_mut())?
                 .filter_map(|op_rc| {
                     let op_ref = op_rc.ptr.borrow();
                     let op = op_ref.entry.as_op();
@@ -575,8 +570,8 @@ pub mod tests {
         let l = Log::new(get_log_file(2, RWBuf::new));
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = make_op_late(
-            OpState::new(id, gen_rand_data(), &mut ti, ll.l.f.serialize_option()).unwrap(),
-            ll.l.f.serialize_option(),
+            OpState::new(id, gen_rand_data(), &mut ti, ll.l.serialize_option()).unwrap(),
+            ll.l.serialize_option(),
         );
         let op_t = op1.op.info.time;
         let op_result = ll.create_local_op(op1.op, &ti).unwrap();
