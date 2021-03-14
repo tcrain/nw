@@ -38,14 +38,12 @@ impl<T: Read> Read for FileWriter<T> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let b = self.file.read(buf)?;
         self.bytes_read += b;
-        // println!("read buf {:?}", &buf);
         Ok(b)
     }
 }
 
 impl<T: Read + Write> Write for FileWriter<T> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // println!("write buf {:?}", &buf);
         let b = self.file.write(buf)?;
         self.bytes_written += b;
         Ok(b)
@@ -199,7 +197,6 @@ impl<F: RWS> LogFile<F> {
             self.at_end = false
         }
         self.check_file();
-        // println!("after read self {}, end {}", self.file_idx, self.end_idx);
         FileOpInfo {
             at_end: self.at_end,
             start_location,
@@ -284,10 +281,7 @@ impl<F: RWS> LogFile<F> {
         let e = self
             .options
             .deserialize_from(&mut self.file)
-            .map_err(|_err| {
-                // println!("read entry error {}", err);
-                LogError::DeserializeError
-            })?;
+            .map_err(|_err| LogError::DeserializeError)?;
         let info = self.after_read();
         Ok((info, e))
     }
@@ -327,7 +321,6 @@ mod tests {
             let e = SomeSer::new(i);
             let prv_idx = l.append_log(&e).unwrap();
             let ser = l.options.serialize(&e).unwrap();
-            // println!("prv idx {:?}, ser {:?}", prv_idx, ser);
             entrys.push((prv_idx, ser, e));
         }
         l.seek_to(0).unwrap();
@@ -343,7 +336,6 @@ mod tests {
         }
         // see if we can read using the location entry
         for (i, (e_info, _, e)) in entrys.iter().enumerate() {
-            // println!("read at {:?}, i {}", e_info, i);
             let (e2_info, e2): (_, SomeSer) = l.read_log_at(e_info.start_location).unwrap();
             assert_eq!(e, &e2);
             if i == entrys.len() - 1 {

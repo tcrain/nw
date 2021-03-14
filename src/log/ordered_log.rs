@@ -15,6 +15,7 @@ use crate::{
 };
 
 use super::{
+    basic_log::Log,
     local_log::{
         LocalLog, OpCreated, OpResult, SpCreated, SpDetails, SpExactToProcess, SpToProcess,
     },
@@ -61,7 +62,7 @@ pub trait LogOrdering {
 }
 
 /// Contains a local log, plus the LogOrdering trait to keep track.
-pub struct OrderedLog<F: RWS, O: LogOrdering> {
+pub struct OrderedLogContainer<F: RWS, O: LogOrdering> {
     pub(crate) l: LocalLog<F>,
     pub(crate) ordering: O,
     // phantom: PhantomData<S>,
@@ -79,12 +80,45 @@ pub struct OrderedExactSp<S: Supporters> {
     pub completed_ops: Vec<PendingOp<S>>,
 }
 
-impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
+pub trait OrderedLog<F: RWS, O: LogOrdering> {
+    fn get_ordering(&self) -> &O;
+    fn get_log_mut(&mut self) -> &mut Log<F>;
+    fn create_local_sp<T: TimeInfo>(&mut self, ti: &mut T) -> Result<OrderedSp<O::Supporter>>;
+    fn create_local_op<T: TimeInfo>(&mut self, op: Op, ti: &T) -> Result<OpResult>;
+    fn serialize_option(&self) -> DefaultOptions;
+    fn received_op<T: TimeInfo>(&mut self, op_c: OpCreated, ti: &T) -> Result<OpResult>;
+    fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess>;
+    fn received_sp<T: TimeInfo>(
+        &mut self,
+        ti: &mut T,
+        sp_p: SpToProcess,
+    ) -> Result<OrderedSp<O::Supporter>>;
+    fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()>;
+    fn received_sp_exact<T: TimeInfo>(
+        &mut self,
+        ti: &mut T,
+        sp_p: SpExactToProcess,
+    ) -> Result<OrderedSp<O::Supporter>>;
+}
+
+impl<F: RWS, O: LogOrdering> OrderedLogContainer<F, O> {
     pub fn new(l: LocalLog<F>, ordering: O) -> Self {
-        OrderedLog { l, ordering }
+        OrderedLogContainer { l, ordering }
+    }
+}
+
+impl<F: RWS, O: LogOrdering> OrderedLog<F, O> for OrderedLogContainer<F, O> {
+    #[inline(always)]
+    fn get_ordering(&self) -> &O {
+        &self.ordering
     }
 
-    pub fn create_local_sp<T: TimeInfo>(&mut self, ti: &mut T) -> Result<OrderedSp<O::Supporter>> {
+    #[inline(always)]
+    fn get_log_mut(&mut self) -> &mut Log<F> {
+        &mut self.l.l
+    }
+
+    fn create_local_sp<T: TimeInfo>(&mut self, ti: &mut T) -> Result<OrderedSp<O::Supporter>> {
         let (sp_p, sp_d) = self
             .l
             .create_local_sp(ti)
@@ -97,7 +131,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
         })
     }
 
-    pub fn create_local_op<T: TimeInfo>(&mut self, op: Op, ti: &T) -> Result<OpResult> {
+    fn create_local_op<T: TimeInfo>(&mut self, op: Op, ti: &T) -> Result<OpResult> {
         let res = self
             .l
             .create_local_op(op, ti)
@@ -107,12 +141,12 @@ impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
     }
 
     #[inline(always)]
-    pub fn serialize_option(&self) -> DefaultOptions {
+    fn serialize_option(&self) -> DefaultOptions {
         self.l.serialize_option()
     }
 
     /// Inpts an operation from an external node in the log.
-    pub fn received_op<T: TimeInfo>(&mut self, op_c: OpCreated, ti: &T) -> Result<OpResult> {
+    fn received_op<T: TimeInfo>(&mut self, op_c: OpCreated, ti: &T) -> Result<OpResult> {
         let res = self
             .l
             .received_op(op_c, ti)
@@ -122,11 +156,11 @@ impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
     }
 
     #[inline(always)]
-    pub fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess> {
+    fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess> {
         self.l.get_sp_exact(sp_c).map_err(OrderingError::LogError)
     }
 
-    pub fn received_sp<T: TimeInfo>(
+    fn received_sp<T: TimeInfo>(
         &mut self,
         ti: &mut T,
         sp_p: SpToProcess,
@@ -143,7 +177,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
         })
     }
 
-    pub fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()> {
+    fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()> {
         let sp = sp_p
             .sp
             .to_sp(self.serialize_option())
@@ -156,7 +190,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog<F, O> {
         Ok(())
     }
 
-    pub fn received_sp_exact<T: TimeInfo>(
+    fn received_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
         sp_p: SpExactToProcess,
@@ -479,6 +513,197 @@ impl<S: Supporters> PendingOp<S> {
             self.support.local_supported = true;
         }
         new_id
+    }
+}
+
+pub mod test_structs {
+    use std::{
+        collections::{HashMap, HashSet},
+        hash::{self, Hash},
+    };
+
+    use bincode::DefaultOptions;
+    use log::debug;
+
+    use crate::{
+        log::{
+            basic_log::Log,
+            local_log::{OpCreated, OpResult, SpCreated, SpExactToProcess, SpToProcess},
+            op::{EntryInfo, Op, OpEntryInfo},
+        },
+        rw_buf::RWS,
+        verification::{Id, TimeInfo},
+    };
+
+    use super::{LogOrdering, OrderedLog, OrderedLogContainer, OrderedSp, Result};
+
+    struct HashEntryInfo(EntryInfo);
+
+    impl Hash for HashEntryInfo {
+        fn hash<H: hash::Hasher>(&self, state: &mut H) {
+            state.write(self.0.hash.as_bytes())
+        }
+    }
+
+    impl Eq for HashEntryInfo {}
+
+    impl PartialEq for HashEntryInfo {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.eq(&other.0)
+        }
+    }
+
+    impl From<&OpEntryInfo> for HashEntryInfo {
+        fn from(op: &OpEntryInfo) -> Self {
+            HashEntryInfo(op.into())
+        }
+    }
+
+    pub fn check_ordered_logs<F: RWS, O: LogOrdering>(logs: &[&OrderedLogTest<F, O>]) {
+        let prev_l = logs[0];
+        for &l in &logs[1..] {
+            // check the log test objects are equal by checking they contain eachother.
+            l.check_other_contains_all(prev_l);
+            prev_l.check_other_contains_all(l);
+        }
+    }
+
+    pub struct OrderedLogTest<F: RWS, O: LogOrdering> {
+        l: OrderedLogContainer<F, O>,
+        // the number of times each op has been received
+        received_ops: HashMap<HashEntryInfo, usize>,
+        // the number of times each Op has been supported by each
+        supported_ops: HashMap<HashEntryInfo, HashMap<Id, usize>>,
+        // the ops that were returned as completed by the ordering
+        completed_ops: HashSet<HashEntryInfo>,
+    }
+
+    impl<F: RWS, O: LogOrdering> OrderedLogTest<F, O> {
+        pub fn new(l: OrderedLogContainer<F, O>) -> Self {
+            OrderedLogTest {
+                l,
+                received_ops: HashMap::default(),
+                supported_ops: HashMap::default(),
+                completed_ops: HashSet::default(),
+            }
+        }
+
+        /// Checks if other has at least all the set of events as self.
+        pub fn check_other_contains_all(&self, other: &OrderedLogTest<F, O>) {
+            // be sure all ops were received by all nodes
+            for (op, _) in self.received_ops.iter() {
+                other
+                    .received_ops
+                    .get(op)
+                    .unwrap_or_else(|| panic!("didn't recive for {:?}", op.0));
+            }
+            // be sure all have the same set of Sps supporting the same set of ops
+            for (op, prev_sup_map) in self.supported_ops.iter() {
+                let sup_map = other
+                    .supported_ops
+                    .get(op)
+                    .unwrap_or_else(|| panic!("didn't find support for {:?}", op.0));
+                let mut prev_sup: Vec<_> = prev_sup_map.iter().map(|(a, b)| (*a, *b)).collect();
+                prev_sup.sort_unstable();
+                let mut sup: Vec<_> = sup_map.iter().map(|(a, b)| (*a, *b)).collect();
+                sup.sort_unstable();
+                assert_eq!(prev_sup, sup);
+            }
+            // be sure all completed the same set of ops
+            for op in self.completed_ops.iter() {
+                if !other.completed_ops.contains(op) {
+                    panic!(
+                        "id {} did not complete op {:?}, got support {:?}",
+                        other.l.l.my_id(),
+                        op.0,
+                        other.supported_ops.get(op)
+                    );
+                }
+            }
+        }
+
+        /// Tracks the ops supported by the Sp.
+        fn after_recv_sp(&mut self, o_sp: &OrderedSp<O::Supporter>) {
+            let id = o_sp.sp_d.info.id;
+            for nxt in o_sp.sp_d.ops.iter() {
+                let support_count = self
+                    .supported_ops
+                    .entry(nxt.into())
+                    .or_default()
+                    .entry(id)
+                    .or_default();
+                *support_count += 1;
+            }
+            debug!("\nSp from {} supports {:?}\n", id, o_sp.sp_d.ops);
+            for nxt in o_sp.completed_ops.iter() {
+                // make sure we only complete an op once
+                assert!(self.completed_ops.replace((&nxt.data).into()).is_none());
+            }
+        }
+
+        /// Tracks the received op.
+        fn after_recv_op(&mut self, op: &OpEntryInfo) {
+            let support_count = self.received_ops.entry(op.into()).or_default();
+            *support_count += 1;
+        }
+    }
+
+    impl<F: RWS, O: LogOrdering> OrderedLog<F, O> for OrderedLogTest<F, O> {
+        fn get_ordering(&self) -> &O {
+            self.l.get_ordering()
+        }
+
+        fn get_log_mut(&mut self) -> &mut Log<F> {
+            self.l.get_log_mut()
+        }
+
+        fn create_local_sp<T: TimeInfo>(&mut self, ti: &mut T) -> Result<OrderedSp<O::Supporter>> {
+            let o_sp = self.l.create_local_sp(ti)?;
+            self.after_recv_sp(&o_sp);
+            Ok(o_sp)
+        }
+        fn create_local_op<T: TimeInfo>(&mut self, op: Op, ti: &T) -> Result<OpResult> {
+            let op = self.l.create_local_op(op, ti)?;
+            self.after_recv_op(&op.info);
+            Ok(op)
+        }
+        fn serialize_option(&self) -> DefaultOptions {
+            self.l.serialize_option()
+        }
+        fn received_op<T: TimeInfo>(&mut self, op_c: OpCreated, ti: &T) -> Result<OpResult> {
+            let op = self.l.received_op(op_c, ti)?;
+            self.after_recv_op(&op.info);
+            Ok(op)
+        }
+        fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess> {
+            self.l.get_sp_exact(sp_c)
+        }
+        fn received_sp<T: TimeInfo>(
+            &mut self,
+            ti: &mut T,
+            sp_p: SpToProcess,
+        ) -> Result<OrderedSp<O::Supporter>> {
+            let o_sp = self.l.received_sp(ti, sp_p)?;
+            self.after_recv_sp(&o_sp);
+            Ok(o_sp)
+        }
+
+        fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()> {
+            self.l.check_sp_exact(ti, sp_p)
+        }
+
+        fn received_sp_exact<T: TimeInfo>(
+            &mut self,
+            ti: &mut T,
+            sp_p: SpExactToProcess,
+        ) -> Result<OrderedSp<O::Supporter>> {
+            for op in sp_p.exact.iter() {
+                self.after_recv_op(op);
+            }
+            let o_sp = self.l.received_sp_exact(ti, sp_p)?;
+            self.after_recv_sp(&o_sp);
+            Ok(o_sp)
+        }
     }
 }
 

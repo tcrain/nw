@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
 use bincode::{DefaultOptions, Options};
+use log::debug;
 
 use crate::{
     errors::EncodeError,
@@ -253,8 +254,7 @@ impl<F: RWS> LocalLog<F> {
         exact: &[EntryInfo],
     ) -> Result<(SpToProcess, SpDetails)> {
         let id = sp.info.id;
-        println!("\nprocess exact sp: {:?}, ops: {:?}\n", sp, exact);
-
+        debug!("\nprocess exact sp: {:?}, ops: {:?}\n", sp, exact);
         let (outer_sp, ops) = self.l.check_sp_exact(sp, exact, ti)?;
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if sp.ptr.borrow().entry.get_entry_info().basic.id == self.id {
@@ -283,9 +283,7 @@ impl<F: RWS> LocalLog<F> {
         not_included: &[EntryInfo],
     ) -> Result<(SpToProcess, SpDetails)> {
         let id = sp.info.id;
-        println!("late included {:?}", late_included);
         let (outer_sp, ops) = self.l.check_sp(sp, &late_included, &not_included, ti)?;
-        // println!("sp hash {:?}", outer_sp.sp.hash);
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if id == self.id {
             // keep our own local last sp so we can consruct our next sp
@@ -317,10 +315,9 @@ impl<F: RWS> LocalLog<F> {
             // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
             let last_sp = self.l.find_sp(self.last_sp, None)?;
-            println!("last SP: {:?}", last_sp.ptr);
             let last_sp_ref = last_sp.ptr.borrow();
             let last_sp_entry = last_sp_ref.entry.as_sp();
-            println!(
+            debug!(
                 "\n\ncreate local sp time {}, last sp {}, {:?}, last op {:?}, not included: {:?}\n",
                 t,
                 last_sp_ref.log_index,
@@ -342,10 +339,6 @@ impl<F: RWS> LocalLog<F> {
             // we will add these specifically as they would not be included normally as they
             // arrived late
             let after_ops = {
-                println!(
-                    "is init sp {}",
-                    self.l.is_init_sp(&last_sp_ref.entry.get_entry_info())
-                );
                 // last_sp_entry.last_op is only None if this is the initial SP
                 // in this case after_ops will be None the call to get_ops_after_iter
                 // will return all ops afterwards in the log
@@ -385,7 +378,7 @@ impl<F: RWS> LocalLog<F> {
                 .filter_map(|op_rc| {
                     let op_ref = op_rc.ptr.borrow();
                     let op = op_ref.entry.as_op();
-                    println!(
+                    debug!(
                         "add op to local sp: id {}, time {} , op: {:?}",
                         op.op.op.info.id, t, op
                     );
@@ -483,7 +476,6 @@ pub mod test_setup {
         }
         while let Some((idx, mut op, mut order)) = new_ops.pop() {
             if let Some(i) = order.pop() {
-                // println!("add op {} to {}", i, idx);
                 op = logs.get_mut(i).unwrap().got_op(op).create;
                 new_ops.push((idx, op, order));
             }

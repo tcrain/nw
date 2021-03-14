@@ -252,7 +252,6 @@ pub(crate) mod tests {
         let op1 = Op::new(id, gen_rand_data(), &mut ti);
 
         let enc = serialize(&op1).unwrap();
-        // println!("op enc len: {}", enc.len());
 
         let dec: Op = deserialize(&enc).unwrap();
 

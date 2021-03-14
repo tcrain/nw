@@ -662,11 +662,6 @@ impl<F: RWS> Log<F> {
         // otherwise we compute the operation prior to the new one in the list
         let mut prev = None;
         for nxt in self.op_total_order_iterator_from_last() {
-            println!(
-                "check back insert op {:?}, check {:?}",
-                nxt.ptr.borrow().entry.as_op().op,
-                op_state
-            );
             let cmp = nxt.ptr.borrow().entry.as_op().op.cmp(&op_state);
             match cmp {
                 Ordering::Less => {
@@ -719,14 +714,6 @@ impl<F: RWS> Log<F> {
         self.last_op_total_order = match self.last_op_total_order.take() {
             None => Some((&new_op_ref).into()),
             Some(last) => {
-                println!(
-                    "update last, prev {:?}, new {:?}, change {}",
-                    last.get_ptr(&mut self.state).borrow().entry.as_op().op,
-                    new_op_ref.ptr.borrow().entry.as_op().op,
-                    last.get_ptr(&mut self.state).borrow().entry.as_op().op
-                        < new_op_ref.ptr.borrow().entry.as_op().op
-                );
-
                 if last.get_ptr(&mut self.state).borrow().entry.as_op().op
                     < new_op_ref.ptr.borrow().entry.as_op().op
                 {
@@ -767,6 +754,8 @@ impl<F: RWS> Log<F> {
 }
 
 pub mod test_fns {
+    use log::debug;
+
     use super::Log;
     use crate::log::log_error::LogError;
     use crate::rw_buf::RWS;
@@ -774,7 +763,7 @@ pub mod test_fns {
     pub fn print_log_from_end<F: RWS>(l: &mut Log<F>) {
         let iter = l.log_iterator_from_end();
         for nxt in iter {
-            println!("{:?}", nxt.ptr.borrow());
+            debug!("{:?}", nxt.ptr.borrow());
         }
     }
 

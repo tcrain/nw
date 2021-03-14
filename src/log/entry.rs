@@ -1078,7 +1078,6 @@ impl OuterSp {
                 let mut entries: Vec<_> = total_order_iterator(&last_op.into(), false, state)
                     .take_while(|nxt| {
                         let nxt_entry = nxt.ptr.borrow().entry.get_entry_info();
-                        println!("going back nxt time {:?} min {:?}", nxt_entry, late_min);
                         nxt_entry >= late_min
                     })
                     .collect();
@@ -1099,20 +1098,6 @@ impl OuterSp {
         state: &mut LogState<F>,
     ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
         // where to start the iterator from
-        println!(
-            "exact {:?}, extra info: {:?}, last op {:?}, not included: {:?}",
-            exact,
-            new_sp.sp.additional_ops,
-            self.last_op
-                .as_ref()
-                .map(|e| e.get_ptr(state).borrow().entry.get_entry_info()),
-            self.not_included_ops
-                .iter()
-                .map(|op| op.get_ptr().borrow().entry.get_entry_info())
-                .collect::<Vec<_>>()
-        );
-
-        // println!("min time {:?}", late_min);
         // create a total order iterator over the operations including the unused items from the previous
         // SP that takes the exact set from exact, and returns the rest as unused, until last_op
         let extra_info = new_sp.sp.additional_ops.iter().cloned();
@@ -1163,27 +1148,10 @@ impl OuterSp {
         // it uses included and not included to decide what operations to include
         // furthermore it includes items that have include_in_hash = true and are after the last operation of the previous
         // SP in the log
-
-        let not_included: Vec<_> = not_included.collect();
-        println!(
-            "\ncheck log order sp: {:?}, late included {:?}, not included {:?}\n",
-            new_sp.sp, late_included, not_included
-        );
-        let not_included = not_included.into_iter();
-
         let last_op = self.get_last_op(first_op.clone(), state)?;
         let extra_info = new_sp.sp.additional_ops.iter().cloned();
         let early_ops =
             self.get_early_ops(last_op, late_included.iter().cloned(), extra_info, state);
-        let early_ops: Vec<_> = early_ops.collect();
-        println!(
-            "early ops {:?}",
-            early_ops
-                .iter()
-                .map(|op| op.ptr.borrow().entry.get_entry_info())
-                .collect::<Vec<_>>()
-        );
-        let early_ops = early_ops.into_iter();
 
         let (not_included_iter, log_iter) = self.get_iters(first_op, state)?;
         let early_ops = early_ops.merge_by(not_included_iter, leq_by_entry);
@@ -1303,7 +1271,7 @@ impl OuterSp {
             if nxt_op_op.arrived_late {
                 late_included.push((&nxt_op).into());
             }
-            println!("added op {:?} to Sp during log order check", nxt_op_op.op);
+            debug!("added op {:?} to Sp during log order check", nxt_op_op.op);
             // add the hash of the op
             hasher.update(nxt_op_op.op.hash.as_bytes());
             count += 1;
@@ -1399,7 +1367,6 @@ pub struct TotalOrderAfterIter<'a, F: RWS> {
     min_index: LogIdx,
     min_entry: EntryInfo,
     include_late: bool,
-    count: usize,
 }
 
 // instead collect the exact set of early ones in a vec before so we only include those (instead of going backwards)
@@ -1409,12 +1376,6 @@ impl<'a, F: RWS> Iterator for TotalOrderAfterIter<'a, F> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(nxt) = self.iter.next() {
-            println!(
-                "nxt to check {:?}, count {}",
-                nxt.ptr.borrow().entry.as_op(),
-                self.count
-            );
-            self.count += 1;
             if nxt.ptr.borrow().log_index >= self.min_index
                 || (self.include_late && nxt.ptr.borrow().entry.as_op().arrived_late)
                 || nxt.ptr.borrow().entry.get_entry_info() > self.min_entry
@@ -1438,7 +1399,6 @@ pub fn total_order_after_late_iter<'a, F: RWS>(
     // late_min: Option<EntryInfo>,
     state: &'a mut LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
-    // println!("after {:?}, time {:?}", start, late_min);
     // if prev sp is not the inital SP, then we need to move forward 1 op since last op was already included in prev sp
     let min_index = start.ptr.borrow().log_index + 1;
     let min_entry = start.ptr.borrow().entry.get_entry_info();
@@ -1447,7 +1407,6 @@ pub fn total_order_after_late_iter<'a, F: RWS>(
         min_index,
         min_entry,
         include_late: true,
-        count: 0,
     }
 }
 
@@ -1462,7 +1421,6 @@ pub fn total_order_after_all_iter<'a, F: RWS>(
         min_index: 0,
         min_entry: start.ptr.borrow().entry.get_entry_info(),
         include_late: true,
-        count: 0,
     }
 }
 
@@ -1476,7 +1434,6 @@ pub fn total_order_after_iter<'a, F: RWS>(
         min_index: start.ptr.borrow().log_index,
         min_entry: start.ptr.borrow().entry.get_entry_info(),
         include_late: false,
-        count: 0,
     }
 }
 #[derive(Debug)]
@@ -1591,7 +1548,6 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(nxt) = self.iter.next() {
-            println!("nxt exact check {:?}", nxt.ptr.borrow().entry.as_op().op);
             let info = nxt.ptr.borrow().entry.get_entry_info();
             // first check if the op is supported by an extra info field
             match self.extra_info_check.check_exact(info) {

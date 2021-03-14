@@ -109,7 +109,7 @@ pub struct SpInfo {
     pub supported_sp_log_index: Option<LogIdx>, // the log index that this sp comes after
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Sp {
     pub info: BasicInfo,
     pub new_ops_supported: SupportCount, // number of new operations supported by this sp
@@ -126,12 +126,6 @@ impl Display for Sp {
             "(id: {}, time: {}, support count: {}, prev sp: {:?})",
             self.info.id, self.info.time, self.new_ops_supported, self.supported_sp_info.basic
         )
-    }
-}
-
-impl Debug for Sp {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        std::fmt::Display::fmt(self, f)
     }
 }
 
@@ -258,7 +252,6 @@ pub mod tests {
 
         let mut enc = serialize(&sp1).unwrap();
         enc.push(10);
-        //println!("enc bytes {}", enc.len());
 
         let dec = deserialize(&enc).unwrap();
 

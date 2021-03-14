@@ -34,7 +34,6 @@ fn run_node<F: RWS, G: Fn(File) -> F + Copy>(open_fn: G) {
     let now = Instant::now();
     for i in 1..1000 {
         // 1 op per log
-        // println!("loop iteration {}", i);
         add_ops_rand_order(&mut logs, &mut rng, i);
         // 1 sp per log
         add_sps(&mut logs, &mut rng);

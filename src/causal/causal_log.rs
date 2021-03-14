@@ -47,20 +47,6 @@ enum PendingEntry<S: Supporters, D: Dependents> {
     Op(PendingOp<S>),
 }
 
-/*
-impl<S: Supporters, D: Dependents> Debug for PendingEntry<S, D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let str = match self {
-            PendingEntry::Unknown => "Unknown",
-            PendingEntry::Completed => "Completed",
-            PendingEntry::Sp(_) => "Sp",
-            PendingEntry::Op(_) => "Op",
-        };
-        f.write_str(str)
-    }
-}
-*/
-
 impl<S: Supporters, D: Dependents> PendingEntry<S, D> {
     #[inline(always)]
     fn completed(&mut self) -> PendingEntry<S, D> {
@@ -163,21 +149,6 @@ impl<S: Supporters> PendingOpState<S> {
         }
     }
 
-    /*
-    fn take_completed_op(&mut self) -> PendingOp<S> {
-        match mem::replace(self, PendingEntry::Unknown) {
-            PendingEntry::PendingOp(op) => op,
-            _ => panic!("expected op"),
-        }
-    }*/
-
-    /* fn completed(&mut self) {
-        match *self {
-            PendingEntry::PendingOp(op) => *self = PendingEntry::Completed(op),
-            _ => panic!("expected pending op"),
-        }
-    }*/
-
     #[inline(always)]
     fn is_completed(&self) -> bool {
         matches!(*self, PendingOpState::Completed)
@@ -232,20 +203,9 @@ impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
                 }
             }
         };
-        // prev_completed: bool,
-        // pending_ops: D, // log indices of non-local ops that this SP depends on
-        // local_pending_ops: Option<Vec<LogIdx>>, // log indicies of local ops that this SP depends on,
-        // // must be in the same order as given in the SP as they will be applied in that order
-        // dependent_sps: Option<Vec<LogIdx>>, // log indices of the SPs that depend on this sp
 
         let mut local_pending_ops = None;
         let mut pending_ops = None;
-
-        // let (mut local_pending_ops, mut pending_ops) = if !prev_completed {
-        //     (Some(vec![]), Some(D::default()))
-        // } else {
-        //     (None, None)
-        // };
         let mut has_dep = false;
         let mut ids = vec![];
         for op_info in deps {
@@ -279,7 +239,7 @@ impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
                 pending_ops.get_or_insert_with(D::default).add_idx(op_idx);
             }
         }
-        println!(
+        debug!(
             "got sp from {}, with deps from {:?}, at my id {}",
             info.id, ids, self.id
         );
@@ -368,12 +328,6 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
     /// Called when an operation is supported by Sps from its creator and the local node.
     /// The Sp at sp_idx was previously received and depended on the the op at op_idx.
     fn sp_got_op_support(&mut self, sp_idx: LogIdx, op_idx: LogIdx) -> Result<(), CausalError> {
-        // prev_completed: bool,
-        // pending_ops: D, // log indices of non-local ops that this SP depends on
-        // local_pending_ops: Option<Vec<LogIdx>>, // log indicies of local ops that this SP depends on,
-        // // must be in the same order as given in the SP as they will be applied in that order
-        // dependent_sps: Option<Vec<LogIdx>>, // log indices of the SPs that depend on this sp
-
         let completed = {
             let sp = self.get_sp_by_idx(sp_idx)?;
             let found = sp.pending_ops.as_mut().unwrap().got_support(op_idx);
@@ -400,11 +354,6 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
         supporter_prev_ready: bool,
         on_recv: bool,
     ) -> Result<SupportInfo, CausalError> {
-        //supporters: S, // IDs of nodes that have supported this op through SPs
-        //data: OpEntryInfo,
-        //local_supported: bool,
-        //dependent_sps: Option<Vec<LogIdx>>, // SPs that depend on this op
-
         // if on_recv is false, then this is called for the Sp for a second time
         // when the Sp's prev Sp becomes ready
         debug_assert!((!on_recv && supporter_prev_ready) || on_recv);
@@ -421,10 +370,10 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
             };
             let prev_supported = op.get_support_info();
             let op_id = op.data.op.info.id;
-            if supporter == op_id || my_id == op_id {
+            if supporter == op_id || supporter == my_id {
                 // if creator/local support we also need the previous to be ready
                 if supporter_prev_ready {
-                    println!(
+                    debug!(
                         "got creator/local support for {}, my id {}",
                         supporter, my_id
                     );
@@ -450,28 +399,6 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
                 }
             };
             (added_support, support_info, dependent_sps)
-            // let pre_support = op.get_support_info();
-            // if supporter == op.data.op.info.id {
-            //     if !op.support.local_supported() && supporter_prev_ready {
-            //         op.got_supporter(supporter, self.id);
-            //         // the op is in causal order
-            //         // let the dependent SPs know the op is supported
-            //         println!("got local support for {}, my id {}", supporter, my_id);
-            //         (true, true, op.dependent_sps.take())
-            //     } else {
-            //         (false, false, None)
-            //     }
-            // } else {
-            //     // the op has a new supporter
-            //     op.got_supporter(supporter, self.id);
-            //     if !op.local_supported() {
-            //         // if the op is not yet supported locally, the supporter is now dependent on the op
-            //         op.add_dependent_sp(supporter_idx);
-            //         (false, false, None)
-            //     } else {
-            //         (false, true, None)
-            //     }
-            // }
         };
         if added_support {
             // the op is in causal order
@@ -520,11 +447,6 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
     }
 
     fn sp_completed(&mut self, sp_idx: LogIdx) {
-        // prev_completed: bool,
-        // pending_ops: D, // log indices of non-local ops that this SP depends on
-        // local_pending_ops: Option<Vec<LogIdx>>, // log indicies of local ops that this SP depends on,
-        // // must be in the same order as given in the SP as they will be applied in that order
-        // dependent_sps: Option<Vec<LogIdx>>, // log indices of the SPs that depend on this sp
         let dependent_sps = {
             let sp = self.get_sp_by_idx(sp_idx).unwrap();
             debug_assert!(sp.is_completed());
@@ -586,13 +508,6 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
         let entry = &mut self.by_log_index[vec_idx].1;
         if entry.is_unknown() {
             panic!("should not be uknown state if we know the index");
-            /* entry = PendingEntry::Sp(PendingSp {
-                data: None,
-                prev_completed: false,
-                pending_ops: D::default(),
-                dependent_sps: Some(vec![]),
-                local_pending_ops: None,
-            }); */
         }
         Ok(entry.as_sp_mut())
     }
@@ -665,38 +580,6 @@ where
     }
 }
 
-/*
-// receive an op - add it to log, keep as pending
-// receive an sp - take all supported ops with the same id, and add return them for the state machine to process
-//               - update the count for supported ops pending commit, any that match commit_count return as committed
-//               - committed needs to replay ops in causal order -> just go by the order of SP processed?
-//               - each SP receives a counter when first processed, then they must be committed in this order
-pub struct Causal<F: RWS> {
-    l: LocalLog<F>,
-    sps_ready_for_commit: Vec<PendingSP>, // SPs with enough supporters, but SPs with smaller processed count not yet supported
-    ops_pending_commit: HMap<EntryInfo, PendingSP>, // when we get commit_count for an entry, it is committed, map is SP -> ids of supporters
-    commit_count: usize, // number of supporters needed before an op/sp is committed
-    last_commited_sp: u64, // most recent index of the SP that has been committed
-    last_processed_sp: u64, // most recent SP processed
-    ops_pending_sp: HMap<Id, Vec<EntryInfoData>>, // when we get an SP from this item, we will process it
-}
-
-impl<F: RWS> Causal<F> {
-    fn new(commit_count: usize, l: LocalLog<F>) -> Self {
-        Causal {
-            l,
-            ops_pending_commit: HMap::default(),
-            commit_count,
-            ops_pending_sp: HMap::default(),
-            sps_ready_for_commit: vec![],
-            last_commited_sp: 0,
-            last_processed_sp: 0,
-        }
-    }
-}
-
-*/
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct VecClock(Vec<u64>);
 
@@ -706,11 +589,13 @@ impl Default for VecClock {
     }
 }
 
-impl VecClock {
-    fn from_vec(vec: Vec<u64>) -> Self {
-        VecClock(vec)
+impl From<Vec<u64>> for VecClock {
+    fn from(v: Vec<u64>) -> Self {
+        VecClock(v)
     }
+}
 
+impl VecClock {
     #[inline(always)]
     fn get_val(&self, id: Id) -> u64 {
         if id as usize >= self.0.len() {
@@ -788,14 +673,14 @@ impl PartialOrd for VecClock {
                 self.0
                     .iter()
                     .cloned()
-                    .chain(repeat(0).take(dif.abs() as usize))
+                    .chain(repeat(0))
                     .zip(other.0.iter().cloned()),
             ),
             Ordering::Greater => check_eq_iter(
                 self.0
                     .iter()
                     .cloned()
-                    .zip(other.0.iter().cloned().chain(repeat(0).take(dif as usize))),
+                    .zip(other.0.iter().cloned().chain(repeat(0))),
             ),
         }
     }
@@ -822,7 +707,10 @@ mod test {
             log_error::LogError,
             log_file::open_log_file,
             op::{to_op_data, Op, OpData},
-            ordered_log::{DepVec, OrderedLog, OrderingError, Result, SupVec},
+            ordered_log::{
+                test_structs::{check_ordered_logs, OrderedLogTest},
+                DepVec, OrderedLog, OrderedLogContainer, OrderingError, Result, SupVec,
+            },
         },
         rw_buf::RWBuf,
         utils,
@@ -833,20 +721,18 @@ mod test {
 
     #[test]
     fn vec_clock() {
-        assert!(VecClock::from_vec(vec![1, 2, 3, 4]) == VecClock::from_vec(vec![1, 2, 3, 4]));
-        assert!(
-            VecClock::from_vec(vec![1, 2, 3, 4]) == VecClock::from_vec(vec![1, 2, 3, 4, 0, 0, 0])
-        );
-        assert!(VecClock::from_vec(vec![2, 2, 3, 4]) >= VecClock::from_vec(vec![1, 2, 3, 4]));
-        assert!(VecClock::from_vec(vec![2, 2, 3, 4, 5]) > VecClock::from_vec(vec![1, 2, 3, 4]));
-        assert!(VecClock::from_vec(vec![1, 2, 3, 4]) > VecClock::from_vec(vec![]));
-        assert!(VecClock::from_vec(vec![]) < VecClock::from_vec(vec![1, 2, 3, 4]));
+        assert!(VecClock::from(vec![1, 2, 3, 4]) == VecClock::from(vec![1, 2, 3, 4]));
+        assert!(VecClock::from(vec![1, 2, 3, 4]) == VecClock::from(vec![1, 2, 3, 4, 0, 0, 0]));
+        assert!(VecClock::from(vec![2, 2, 3, 4]) >= VecClock::from(vec![1, 2, 3, 4]));
+        assert!(VecClock::from(vec![2, 2, 3, 4, 5]) > VecClock::from(vec![1, 2, 3, 4]));
+        assert!(VecClock::from(vec![1, 2, 3, 4]) > VecClock::from(vec![]));
+        assert!(VecClock::from(vec![]) < VecClock::from(vec![1, 2, 3, 4]));
 
-        assert!(VecClock::from_vec(vec![1, 2])
-            .partial_cmp(&VecClock::from_vec(vec![2, 1]))
+        assert!(VecClock::from(vec![1, 2])
+            .partial_cmp(&VecClock::from(vec![2, 1]))
             .is_none());
-        assert!(VecClock::from_vec(vec![1, 1, 1])
-            .partial_cmp(&VecClock::from_vec(vec![2, 2]))
+        assert!(VecClock::from(vec![1, 1, 1])
+            .partial_cmp(&VecClock::from(vec![2, 2]))
             .is_none());
 
         let mut v1 = VecClock::default();
@@ -857,14 +743,14 @@ mod test {
         }
         assert!(v1 == v2);
 
-        let mut v1 = VecClock::from_vec(vec![1, 2, 3, 4]);
-        let v2 = VecClock::from_vec(vec![4, 1, 1, 1, 1]);
+        let mut v1 = VecClock::from(vec![1, 2, 3, 4]);
+        let v2 = VecClock::from(vec![4, 1, 1, 1, 1]);
         v1.max_in_place(&v2);
-        assert_eq!(v1, VecClock::from_vec(vec![4, 2, 3, 4, 1]));
+        assert_eq!(v1, VecClock::from(vec![4, 2, 3, 4, 1]));
     }
 
     struct CausalLog {
-        l: OrderedLog<RWBuf<File>, PendingEntries<SupVec, DepVec>>,
+        l: OrderedLogTest<RWBuf<File>, PendingEntries<SupVec, DepVec>>,
         c: VecClock,
         c_all: VecClock, // keeps max of all operaions added, to make sure we commit all operations in the end
         op_count: u64,
@@ -887,7 +773,7 @@ mod test {
             )
             .unwrap();
             let pe = PendingEntries::new(commit_count, id);
-            let l = OrderedLog::new(f, pe);
+            let l = OrderedLogTest::new(OrderedLogContainer::new(f, pe));
             CausalLog {
                 l,
                 c: VecClock::default(),
@@ -960,7 +846,7 @@ mod test {
         fn after_recv_sp<'a, I: Iterator<Item = &'a OpData>>(&mut self, from: Id, deps: I) {
             for op in deps {
                 let v: VecClock = deserialize(op).unwrap();
-                println!(
+                debug!(
                     "got vec {:?} from {}, my id {}, mine {:?}",
                     v, from, self.id, self.c
                 );
@@ -974,8 +860,9 @@ mod test {
 
     #[test]
     fn causal() {
-        let num_logs = 3;
-        let commit_count = 1;
+        let num_logs = 4;
+        // an op is not committed until it is supported by 3 nodes
+        let commit_count = 3;
         let mut logs = vec![];
         for id in 0..num_logs {
             logs.push(CausalLog::new(id, id as usize, commit_count));
@@ -983,7 +870,7 @@ mod test {
         let mut ops = vec![];
         let mut sps = vec![];
         // create an op and an SP in each log
-        print_logs(&mut logs);
+        // print_logs(&mut logs);
         for i in 0..num_logs as usize {
             ops.push(logs[i].new_op().unwrap());
             assert_eq!(
@@ -995,7 +882,7 @@ mod test {
             );
         }
         create_sp(&mut logs, &mut sps);
-        print_logs(&mut logs);
+        // print_logs(&mut logs);
         // insert the ops in each log
         for (i, l) in logs.iter_mut().enumerate() {
             for j in 0..(num_logs - 1) as usize {
@@ -1004,27 +891,28 @@ mod test {
                 ops[j] = l.recv_op(ops[j].create.clone()).unwrap();
             }
         }
-        print_logs(&mut logs);
+        //print_logs(&mut logs);
         // insert the sps in each log
         insert_sps(&mut logs, &mut sps);
-        print_logs(&mut logs);
+        // print_logs(&mut logs);
         // create a new Sp at each log so that they each support the exernal ops
         create_sp(&mut logs, &mut sps);
-        print_logs(&mut logs);
+        insert_sps(&mut logs, &mut sps);
+        //print_logs(&mut logs);
 
-        check_causal_logs(logs.iter());
+        check_causal_logs(&mut logs);
     }
     fn print_logs(logs: &mut Vec<CausalLog>) {
         for (i, l) in logs.iter_mut().enumerate() {
-            println!("\n\nprinting log {}", i);
-            print_log_from_end(&mut l.l.l.l);
+            debug!("\n\nprinting log {}", i);
+            print_log_from_end(l.l.get_log_mut());
         }
-        println!("\n\n");
+        debug!("\n\n");
     }
 
     fn create_sp(logs: &mut Vec<CausalLog>, sps: &mut Vec<SpExactToProcess>) {
         for l in logs.iter_mut() {
-            println!("\nCreateSP\n");
+            debug!("\nCreateSP\n");
             l.ti.set_current_time_valid();
             let (sp, _) = l.create_local_sp().unwrap();
             assert_eq!(
@@ -1039,23 +927,36 @@ mod test {
         let num_logs = logs.len();
         for (i, l) in logs.iter_mut().enumerate() {
             for j in 0..(num_logs - 1) as usize {
-                println!("\nInsert Sp in log {} from {}\n", i, j);
+                debug!("\nInsert Sp in log {} from {}\n", i, j);
 
                 let j = (i + j + 1) % num_logs as usize;
                 let sp_p = l.received_sp_exact(sps[j].clone()).unwrap().0;
                 sps[j] = l.l.get_sp_exact(sp_p.sp).unwrap();
             }
         }
+        sps.clear();
     }
 
-    fn check_causal_logs<'a>(i: impl Iterator<Item = &'a CausalLog>) {
+    fn check_causal_logs(logs: &mut [CausalLog]) {
+        for (i, l) in logs.iter_mut().enumerate() {
+            debug!(
+                "\nPending entries in log {}: {:?}\n",
+                i,
+                l.l.get_ordering().by_log_index
+            );
+            debug!("the log is: ");
+            print_log_from_end(l.l.get_log_mut());
+        }
+
+        let test_logs: Vec<_> = logs.iter().map(|l| &l.l).collect();
+        check_ordered_logs(&test_logs);
+
         let mut prev_vec = None;
-        for l in i {
-            println!("vec: {:?}", l.l.ordering.by_log_index);
+        for l in logs {
             if let Some(p) = prev_vec.take() {
                 assert_eq!(p, l.c);
                 assert_eq!(p, l.c_all);
-                println!("{:?}, {:?}", p, l.c);
+                debug!("{:?}, {:?}", p, l.c);
             }
             prev_vec = Some(l.c.clone())
         }
@@ -1084,6 +985,7 @@ mod test {
         let mut rng = StdRng::seed_from_u64(seed);
         // choose an op type
         let mut op_count = 0;
+        // continue until we have created enough ops and they have all been processed by all nodes
         while op_count < num_ops || !ops.is_empty() {
             match rng.gen() {
                 ChooseOp::CreateEntry => {
@@ -1167,17 +1069,18 @@ mod test {
             }
         }
         // check the logs have the same vector clock
-        check_causal_logs(logs.iter());
+        check_causal_logs(&mut logs);
     }
 
     #[test]
     fn causal_rand() {
-        let num_logs = 3;
-        let commit_count = 3;
-        let num_ops = 5;
-        // let seed = 102;
-        for seed in 105..106 {
-            run_causal_rand(num_logs, commit_count, num_ops, seed);
+        let num_ops = 20;
+        for seed in 100..110 {
+            for num_logs in 2..4 {
+                for commit_count in 1..=num_logs as usize {
+                    run_causal_rand(num_logs, commit_count, num_ops, seed);
+                }
+            }
         }
     }
 }
