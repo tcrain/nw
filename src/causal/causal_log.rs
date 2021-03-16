@@ -15,9 +15,7 @@ use crate::{
     log::{
         local_log::LocalLog,
         op::OpEntryInfo,
-        ordered_log::{
-            self, Dependents, LogOrdering, OrderingError, PendingOp, SupportInfo, Supporters,
-        },
+        ordered_log::{self, Dependents, LogOrdering, OrderingError, PendingOp, Supporters},
         sp::SpInfo,
         LogIdx,
     },
@@ -38,13 +36,102 @@ impl Display for CausalError {
         std::fmt::Debug::fmt(&self, f)
     }
 }
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct SupportInfo {
+    local_supported: bool, // true if received an Sp from the local node supporting this op
+    creator_supported: bool, // true if received an SP from the creator of this op supporting this op
+}
+
+impl Default for SupportInfo {
+    fn default() -> Self {
+        SupportInfo {
+            local_supported: false,
+            creator_supported: false,
+        }
+    }
+}
+
+impl SupportInfo {
+    /// Creates a new SupportInfo with support set to true.
+    pub fn new_supported() -> SupportInfo {
+        SupportInfo {
+            local_supported: true,
+            creator_supported: true,
+        }
+    }
+
+    /// Returns true if supported both by the local node and the op creator.
+    #[inline(always)]
+    pub fn is_supported(&self) -> bool {
+        self.local_supported && self.creator_supported
+    }
+
+    /// Returns true if supported by the op creator.
+    #[inline(always)]
+    pub fn creator_supported(&self) -> bool {
+        self.creator_supported
+    }
+
+    /// Returns true if supported by the local node.
+    #[inline(always)]
+    pub fn local_supported(&self) -> bool {
+        self.local_supported
+    }
+}
+
+#[derive(Debug)]
+struct CausalOp<S: Supporters> {
+    support: SupportInfo,
+    dependent_sps: Option<Vec<LogIdx>>, // SPs that depend on this op
+    p: PendingOp<S>,
+}
+
+impl<S: Supporters> CausalOp<S> {
+    #[inline(always)]
+    pub fn new(data: OpEntryInfo) -> Self {
+        CausalOp {
+            p: PendingOp::new(data),
+            support: SupportInfo::default(),
+            dependent_sps: Some(vec![]), // sps that are waiting until we have local support
+        }
+    }
+
+    #[inline(always)]
+    pub fn get_support_info(&self) -> SupportInfo {
+        self.support
+    }
+
+    #[inline(always)]
+    pub fn is_completed(&self, commit_count: usize) -> bool {
+        self.support.is_supported() && self.p.supporters.get_count() >= commit_count
+    }
+
+    #[inline(always)]
+    pub fn add_dependent_sp(&mut self, log_idx: LogIdx) {
+        self.dependent_sps.as_mut().unwrap().push(log_idx);
+    }
+    /// Called when id supports the op.
+    /// local_id is the id of the local node.
+    /// Returns true if id is a new supporter.
+    #[inline(always)]
+    pub fn got_supporter(&mut self, id: Id, local_id: Id) -> bool {
+        let new_id = self.p.supporters.add_id(id);
+        if new_id && !self.support.creator_supported && id == self.p.data.op.info.id {
+            self.support.creator_supported = true;
+        }
+        if new_id && !self.support.local_supported && id == local_id {
+            self.support.local_supported = true;
+        }
+        new_id
+    }
+}
 
 #[derive(Debug)]
 enum PendingEntry<S: Supporters, D: Dependents> {
     Unknown,
     Completed,
     Sp(PendingSp<D>),
-    Op(PendingOp<S>),
+    Op(CausalOp<S>),
 }
 
 impl<S: Supporters, D: Dependents> PendingEntry<S, D> {
@@ -70,14 +157,14 @@ impl<S: Supporters, D: Dependents> PendingEntry<S, D> {
         matches!(*self, PendingEntry::Op(_))
     }
     #[inline(always)]
-    fn as_op_mut(&mut self) -> &mut PendingOp<S> {
+    fn as_op_mut(&mut self) -> &mut CausalOp<S> {
         match self {
             PendingEntry::Op(op) => op,
             _ => panic!(format!("expected op, {:?}", self)),
         }
     }
     #[inline(always)]
-    fn unwrap_op(self) -> PendingOp<S> {
+    fn unwrap_op(self) -> CausalOp<S> {
         match self {
             PendingEntry::Op(op) => op,
             _ => panic!("expected op"),
@@ -105,7 +192,7 @@ impl<S: Supporters, D: Dependents> PendingEntry<S, D> {
             PendingEntry::Unknown => None,
             PendingEntry::Completed => None,
             PendingEntry::Sp(sp) => sp.data.as_ref().map(|d| d.log_index),
-            PendingEntry::Op(op) => Some(op.data.log_index),
+            PendingEntry::Op(op) => Some(op.p.data.log_index),
         }
     }
 }
@@ -264,6 +351,13 @@ impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
     /// Called when an op is received.
     #[inline(always)]
     fn recv_op(&mut self, op: OpEntryInfo) -> ordered_log::Result<()> {
+        let op_idx = op.log_index;
+        if self.id == 0 {
+            println!("got op {}", op_idx);
+            if op_idx == 38 {
+                println!("{:?}", op);
+            }
+        }
         self.get_op(op)
             .and(Ok(()))
             .map_err(|e| OrderingError::Custom(Box::new(e)))
@@ -296,9 +390,9 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
                 PendingEntry::Sp(_) => panic!("sp should not be ordered by ops"),
                 PendingEntry::Completed => panic!("should have consumed completed"),
                 PendingEntry::Op(po) => {
-                    debug_assert_eq!(log_idx, po.data.log_index);
+                    debug_assert_eq!(log_idx, po.p.data.log_index);
                     if po.is_completed(self.commit_count) {
-                        committed.push(pe.1.completed().unwrap_op());
+                        committed.push(pe.1.completed().unwrap_op().p);
                     } else {
                         break;
                     }
@@ -369,7 +463,7 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
                 GetOp::OpData(data) => self.get_op(data)?,
             };
             let prev_supported = op.get_support_info();
-            let op_id = op.data.op.info.id;
+            let op_id = op.p.data.op.info.id;
             if supporter == op_id || supporter == my_id {
                 // if creator/local support we also need the previous to be ready
                 if supporter_prev_ready {
@@ -461,18 +555,18 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
     }
 
     #[inline(always)]
-    fn get_op(&mut self, op: OpEntryInfo) -> Result<&mut PendingOp<S>, CausalError> {
+    fn get_op(&mut self, op: OpEntryInfo) -> Result<&mut CausalOp<S>, CausalError> {
         let vec_idx = self.get_entry_idx(op.log_index)?;
         self.check_idx(op.log_index, vec_idx);
         let entry = &mut self.by_log_index[vec_idx].1;
         if entry.is_unknown() {
-            *entry = PendingEntry::Op(PendingOp::new(op));
+            *entry = PendingEntry::Op(CausalOp::new(op));
         }
         Ok(entry.as_op_mut())
     }
 
     #[inline(always)]
-    fn get_op_by_idx(&mut self, log_index: LogIdx) -> Result<&mut PendingOp<S>, CausalError> {
+    fn get_op_by_idx(&mut self, log_index: LogIdx) -> Result<&mut CausalOp<S>, CausalError> {
         let vec_idx = self.get_entry_idx(log_index)?;
         self.check_idx(log_index, vec_idx);
         let entry = &mut self.by_log_index[vec_idx].1;
@@ -688,32 +782,26 @@ impl PartialOrd for VecClock {
 
 #[cfg(test)]
 mod test {
-    use bincode::{deserialize, serialize, DefaultOptions};
+    use bincode::{deserialize, serialize};
     use log::debug;
-    use rand::{
-        distributions::Standard,
-        prelude::{Distribution, StdRng},
-        Rng, SeedableRng,
-    };
-    use std::{collections::VecDeque, fs::File};
+    use std::fs::File;
 
     use crate::{
         log::{
             basic_log::test_fns::print_log_from_end,
             basic_log::Log,
-            local_log::{
-                new_local_log, OpCreated, OpResult, SpDetails, SpExactToProcess, SpToProcess,
-            },
-            log_error::LogError,
+            local_log::new_local_log,
             log_file::open_log_file,
-            op::{to_op_data, Op, OpData},
+            op::{to_op_data, OpData, OpEntryInfo},
             ordered_log::{
-                test_structs::{check_ordered_logs, OrderedLogTest},
-                DepVec, OrderedLog, OrderedLogContainer, OrderingError, Result, SupVec,
+                test_structs::{
+                    check_ordered_logs, run_ordered_once, run_ordered_rand, OrderedLogTest,
+                },
+                DepVec, OrderedLog, OrderedLogContainer, OrderedLogRun, OrderedState,
+                OrderingError, Result, SupVec,
             },
         },
         rw_buf::RWBuf,
-        utils,
         verification::{Id, TimeTest},
     };
 
@@ -749,103 +837,45 @@ mod test {
         assert_eq!(v1, VecClock::from(vec![4, 2, 3, 4, 1]));
     }
 
-    struct CausalLog {
-        l: OrderedLogTest<RWBuf<File>, PendingEntries<SupVec, DepVec>>,
+    // Implementation of OrderedState that tracks a vector clock.
+    struct CausalLogClock {
         c: VecClock,
         c_all: VecClock, // keeps max of all operaions added, to make sure we commit all operations in the end
         op_count: u64,
         id: Id,
-        ti: TimeTest,
     }
 
-    impl CausalLog {
-        fn new(id: Id, test_idx: usize, commit_count: usize) -> Self {
-            let f = new_local_log(
-                id,
-                Log::new(
-                    open_log_file(
-                        &format!("log_files/causal_log{}_{}.log", test_idx, id),
-                        true,
-                        RWBuf::new,
-                    )
-                    .unwrap(),
-                ),
-            )
-            .unwrap();
-            let pe = PendingEntries::new(commit_count, id);
-            let l = OrderedLogTest::new(OrderedLogContainer::new(f, pe));
-            CausalLog {
-                l,
-                c: VecClock::default(),
-                c_all: VecClock::default(),
-                op_count: 0,
-                id,
-                ti: TimeTest::new(),
-            }
-        }
-
-        #[inline(always)]
-        pub fn serialize_option(&self) -> DefaultOptions {
-            self.l.serialize_option()
-        }
-
-        fn new_op(&mut self) -> Result<OpResult> {
-            self.op_count += 1;
-            let mut c = self.c.clone();
-            c.set_entry(self.id, self.op_count);
-            self.c_all.max_in_place(&c);
-            let data = to_op_data(serialize(&c).unwrap());
-            let op = Op::new(self.id, data, &mut self.ti);
-            self.l.create_local_op(op, &self.ti)
-        }
-
-        fn recv_op(&mut self, op_c: OpCreated) -> Result<OpResult> {
-            let op = self.l.received_op(op_c, &self.ti)?;
-            self.update_c_all(&op.info.op.data);
-            Ok(op)
-        }
-
+    impl CausalLogClock {
         fn update_c_all(&mut self, data: &OpData) {
             let v: VecClock = deserialize(data).unwrap();
             self.c_all.max_in_place(&v);
         }
+    }
 
-        pub fn create_local_sp(&mut self) -> Result<(SpToProcess, SpDetails)> {
-            let spr = self.l.create_local_sp(&mut self.ti)?;
-            self.after_recv_sp(
-                spr.sp_d.info.id,
-                spr.completed_ops.iter().map(|op| &op.data.op.data),
-            );
-            Ok((spr.sp_p, spr.sp_d))
+    impl OrderedState for CausalLogClock {
+        fn create_local_op(&mut self) -> Result<OpData> {
+            self.op_count += 1;
+            let mut c = self.c.clone();
+            c.set_entry(self.id, self.op_count);
+            self.c_all.max_in_place(&c);
+            Ok(to_op_data(serialize(&c).unwrap()))
         }
 
-        pub fn received_sp(&mut self, sp_p: SpToProcess) -> Result<(SpToProcess, SpDetails)> {
-            let spr = self.l.received_sp(&mut self.ti, sp_p)?;
-            self.after_recv_sp(
-                spr.sp_d.info.id,
-                spr.completed_ops.iter().map(|op| &op.data.op.data),
-            );
-            Ok((spr.sp_p, spr.sp_d))
-        }
-
-        pub fn received_sp_exact(
-            &mut self,
-            sp_e: SpExactToProcess,
-        ) -> Result<(SpToProcess, SpDetails)> {
-            for op in sp_e.exact.iter() {
-                self.update_c_all(&op.op.data);
+        fn check_op(&mut self, op: &OpData) -> Result<()> {
+            // just check is deserialzes ok
+            match deserialize::<VecClock>(op) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(OrderingError::Custom(e)),
             }
-            let spr = self.l.received_sp_exact(&mut self.ti, sp_e)?;
-            self.after_recv_sp(
-                spr.sp_d.info.id,
-                spr.completed_ops.iter().map(|op| &op.data.op.data),
-            );
-            Ok((spr.sp_p, spr.sp_d))
         }
 
-        fn after_recv_sp<'a, I: Iterator<Item = &'a OpData>>(&mut self, from: Id, deps: I) {
+        fn received_op(&mut self, op: &OpEntryInfo) {
+            self.update_c_all(&op.op.data);
+        }
+
+        fn after_recv_sp<'a, I: Iterator<Item = &'a OpEntryInfo>>(&mut self, from: Id, deps: I) {
             for op in deps {
-                let v: VecClock = deserialize(op).unwrap();
+                let v: VecClock = deserialize(&op.op.data).unwrap();
                 debug!(
                     "got vec {:?} from {}, my id {}, mine {:?}",
                     v, from, self.id, self.c
@@ -859,217 +889,16 @@ mod test {
     }
 
     #[test]
-    fn causal() {
+    fn causal_single() {
         let num_logs = 4;
         // an op is not committed until it is supported by 3 nodes
         let commit_count = 3;
         let mut logs = vec![];
         for id in 0..num_logs {
-            logs.push(CausalLog::new(id, id as usize, commit_count));
+            logs.push(new_causal(id, 100 + id as usize, commit_count));
         }
-        let mut ops = vec![];
-        let mut sps = vec![];
-        // create an op and an SP in each log
-        // print_logs(&mut logs);
-        for i in 0..num_logs as usize {
-            ops.push(logs[i].new_op().unwrap());
-            assert_eq!(
-                &LogError::OpAlreadyExists,
-                logs[i]
-                    .recv_op(ops[i].create.clone())
-                    .unwrap_err()
-                    .unwrap_log_error()
-            );
-        }
-        create_sp(&mut logs, &mut sps);
-        // print_logs(&mut logs);
-        // insert the ops in each log
-        for (i, l) in logs.iter_mut().enumerate() {
-            for j in 0..(num_logs - 1) as usize {
-                l.ti.set_current_time_valid();
-                let j = (i + j + 1) % num_logs as usize;
-                ops[j] = l.recv_op(ops[j].create.clone()).unwrap();
-            }
-        }
-        //print_logs(&mut logs);
-        // insert the sps in each log
-        insert_sps(&mut logs, &mut sps);
-        // print_logs(&mut logs);
-        // create a new Sp at each log so that they each support the exernal ops
-        create_sp(&mut logs, &mut sps);
-        insert_sps(&mut logs, &mut sps);
-        //print_logs(&mut logs);
-
-        check_causal_logs(&mut logs);
-    }
-    fn print_logs(logs: &mut Vec<CausalLog>) {
-        for (i, l) in logs.iter_mut().enumerate() {
-            debug!("\n\nprinting log {}", i);
-            print_log_from_end(l.l.get_log_mut());
-        }
-        debug!("\n\n");
-    }
-
-    fn create_sp(logs: &mut Vec<CausalLog>, sps: &mut Vec<SpExactToProcess>) {
-        for l in logs.iter_mut() {
-            debug!("\nCreateSP\n");
-            l.ti.set_current_time_valid();
-            let (sp, _) = l.create_local_sp().unwrap();
-            assert_eq!(
-                &LogError::SpAlreadyExists,
-                l.received_sp(sp.clone()).unwrap_err().unwrap_log_error()
-            );
-            sps.push(l.l.get_sp_exact(sp.sp).unwrap());
-        }
-    }
-
-    fn insert_sps(logs: &mut Vec<CausalLog>, sps: &mut Vec<SpExactToProcess>) {
-        let num_logs = logs.len();
-        for (i, l) in logs.iter_mut().enumerate() {
-            for j in 0..(num_logs - 1) as usize {
-                debug!("\nInsert Sp in log {} from {}\n", i, j);
-
-                let j = (i + j + 1) % num_logs as usize;
-                let sp_p = l.received_sp_exact(sps[j].clone()).unwrap().0;
-                sps[j] = l.l.get_sp_exact(sp_p.sp).unwrap();
-            }
-        }
-        sps.clear();
-    }
-
-    fn check_causal_logs(logs: &mut [CausalLog]) {
-        for (i, l) in logs.iter_mut().enumerate() {
-            debug!(
-                "\nPending entries in log {}: {:?}\n",
-                i,
-                l.l.get_ordering().by_log_index
-            );
-            debug!("the log is: ");
-            print_log_from_end(l.l.get_log_mut());
-        }
-
-        let test_logs: Vec<_> = logs.iter().map(|l| &l.l).collect();
-        check_ordered_logs(&test_logs);
-
-        let mut prev_vec = None;
-        for l in logs {
-            if let Some(p) = prev_vec.take() {
-                assert_eq!(p, l.c);
-                assert_eq!(p, l.c_all);
-                debug!("{:?}, {:?}", p, l.c);
-            }
-            prev_vec = Some(l.c.clone())
-        }
-    }
-
-    enum ChooseOp {
-        ProcessEntry,
-        CreateEntry,
-    }
-
-    impl Distribution<ChooseOp> for Standard {
-        fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> ChooseOp {
-            match rng.gen_range(0..100) {
-                0..=80 => ChooseOp::ProcessEntry,
-                _ => ChooseOp::CreateEntry,
-            }
-        }
-    }
-
-    fn run_causal_rand(num_logs: u64, commit_count: usize, num_ops: usize, seed: u64) {
-        let mut logs = vec![];
-        for id in 0..num_logs {
-            logs.push(CausalLog::new(id, id as usize, commit_count));
-        }
-        let mut ops = vec![];
-        let mut rng = StdRng::seed_from_u64(seed);
-        // choose an op type
-        let mut op_count = 0;
-        // continue until we have created enough ops and they have all been processed by all nodes
-        while op_count < num_ops || !ops.is_empty() {
-            match rng.gen() {
-                ChooseOp::CreateEntry => {
-                    if op_count >= num_ops {
-                        // now we just want to process existing ops
-                        continue;
-                    }
-                    let idx = rng.gen_range(0..num_logs) as usize;
-                    let others: VecDeque<usize> =
-                        utils::gen_shuffled(num_logs as usize, Some(idx), &mut rng).into();
-                    debug!("idx {}, others {:?}", idx, others);
-                    let l = &mut logs[idx];
-                    l.new_op().unwrap();
-                    l.ti.set_current_time_valid();
-                    let (sp, _) = l.create_local_sp().unwrap();
-                    let sp_e = l.l.get_sp_exact(sp.sp).unwrap();
-                    debug!(
-                        "new sp {:?}, exact {:?}",
-                        sp_e.sp.to_sp(l.serialize_option()).unwrap(),
-                        sp_e.exact
-                    );
-                    ops.push((sp_e, others));
-                    op_count += 1;
-                }
-                ChooseOp::ProcessEntry => {
-                    if ops.is_empty() {
-                        // we need to generate a new op
-                        continue;
-                    }
-                    // process a random op
-                    let op_idx = rng.gen_range(0..ops.len());
-                    let (sp, others) = &mut ops[op_idx];
-                    let idx = others.pop_back().unwrap();
-                    debug!("process log {}", idx);
-                    let l = &mut logs[idx];
-                    l.ti.set_sp_time_valid(sp.sp.to_sp(l.serialize_option()).unwrap().info.time);
-                    if let Err(err) = l.l.check_sp_exact(&l.ti, sp) {
-                        if let OrderingError::LogError(err) = &err {
-                            match err {
-                                LogError::PrevSpNotFound => {
-                                    others.push_front(idx);
-                                    continue;
-                                }
-                                LogError::PrevSpHasNoLastOp
-                                | LogError::NotEnoughOpsForSP
-                                | LogError::SpSkippedOps(_) => {
-                                    // ok
-                                }
-                                _ => panic!("unexpected error from Sp {:?}", err),
-                            }
-                        } else {
-                            panic!("should not be able to process Sp");
-                        }
-                    }
-                    debug!("process sp {:?}", sp);
-                    let (n_sp, _) = l.received_sp_exact(sp.clone()).unwrap();
-                    *sp = l.l.get_sp_exact(n_sp.sp).unwrap();
-                    if others.is_empty() {
-                        // all logs have received this op/sp
-                        ops.swap_remove(op_idx);
-                    }
-                }
-            }
-        }
-
-        let mut end_sps = vec![];
-        for (i, l) in logs.iter_mut().enumerate() {
-            // create an Sp at each node so all ops are supported by all Sps
-            if let Ok((sp, _)) = l.create_local_sp() {
-                let sp_e = l.l.get_sp_exact(sp.sp).unwrap();
-                end_sps.push((i, sp_e));
-            }
-        }
-        for (i, sp) in end_sps.into_iter() {
-            for (j, l) in logs.iter_mut().enumerate() {
-                if i == j {
-                    continue;
-                }
-                l.ti.set_sp_time_valid(sp.sp.to_sp(l.serialize_option()).unwrap().info.time);
-                l.received_sp_exact(sp.clone()).unwrap();
-            }
-        }
-        // check the logs have the same vector clock
-        check_causal_logs(&mut logs);
+        run_ordered_once(&mut logs);
+        check_logs(&mut logs);
     }
 
     #[test]
@@ -1078,9 +907,67 @@ mod test {
         for seed in 100..110 {
             for num_logs in 2..4 {
                 for commit_count in 1..=num_logs as usize {
-                    run_causal_rand(num_logs, commit_count, num_ops, seed);
+                    let mut logs = vec![];
+                    for id in 0..num_logs {
+                        logs.push(new_causal(id, id as usize, commit_count));
+                    }
+                    run_ordered_rand(&mut logs, num_ops, seed);
+                    // check the logs have the same vector clock
+                    check_logs(&mut logs);
                 }
             }
+        }
+    }
+
+    type CausalTestLog =
+        OrderedLogRun<OrderedLogTest<RWBuf<File>, PendingEntries<SupVec, DepVec>>, CausalLogClock>;
+
+    fn new_causal(id: Id, test_idx: usize, commit_count: usize) -> (CausalTestLog, TimeTest) {
+        let f = new_local_log(
+            id,
+            Log::new(
+                open_log_file(
+                    &format!("log_files/causal_log{}_{}.log", test_idx, id),
+                    true,
+                    RWBuf::new,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let pe = PendingEntries::new(commit_count, id);
+        let l = OrderedLogTest::new(OrderedLogContainer::new(f, pe));
+        let c = CausalLogClock {
+            c: VecClock::default(),
+            c_all: VecClock::default(),
+            op_count: 0,
+            id,
+        };
+        (OrderedLogRun::new(id, l, c), TimeTest::new())
+    }
+
+    fn check_logs(logs: &mut [(CausalTestLog, TimeTest)]) {
+        for (i, (l, _)) in logs.iter_mut().enumerate() {
+            debug!(
+                "\nPending entries in log {}: {:?}\n",
+                i,
+                l.get_l().get_ordering().by_log_index
+            );
+            debug!("the log is: ");
+            print_log_from_end(l.get_l_mut().get_log_mut());
+        }
+
+        let test_logs: Vec<_> = logs.iter().map(|(l, _)| l.get_l()).collect();
+        check_ordered_logs(&test_logs);
+
+        let mut prev_vec = None;
+        for (l, _) in logs {
+            if let Some(p) = prev_vec.take() {
+                assert_eq!(p, l.get_s().c);
+                assert_eq!(p, l.get_s().c_all);
+                debug!("{:?}, {:?}", p, l.get_s().c);
+            }
+            prev_vec = Some(l.get_s().c.clone())
         }
     }
 }

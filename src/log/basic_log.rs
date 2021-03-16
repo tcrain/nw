@@ -18,7 +18,7 @@ use super::{
     },
     log_error::{LogError, Result},
     log_file::LogFile,
-    op::{BasicInfo, EntryInfo, Op, OpEntryInfo, OpState},
+    op::{BasicInfo, EntryInfo, Op, OpState},
     sp::SpState,
 };
 use super::{hash_items::HashItems, sp::Sp};
@@ -495,7 +495,7 @@ impl<F: RWS> Log<F> {
         late_included: &[EntryInfo],
         not_included: &[EntryInfo],
         ti: &T,
-    ) -> Result<(OuterSp, Vec<OpEntryInfo>)>
+    ) -> Result<(OuterSp, Vec<StrongPtrIdx>)>
     where
         T: TimeInfo,
     {
@@ -517,7 +517,7 @@ impl<F: RWS> Log<F> {
         )
     }
 
-    pub fn get_sp_exact(&mut self, info: EntryInfo) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
+    pub fn get_sp_exact(&mut self, info: EntryInfo) -> Result<(OuterSp, Vec<StrongPtrIdx>)> {
         if info == self.get_initial_entry_info() {
             return Err(LogError::IsInitSP);
         }
@@ -558,7 +558,7 @@ impl<F: RWS> Log<F> {
         sp: Sp,
         exact: &[EntryInfo],
         ti: &T,
-    ) -> Result<(OuterSp, Vec<OpEntryInfo>)>
+    ) -> Result<(OuterSp, Vec<StrongPtrIdx>)>
     where
         T: TimeInfo,
     {
@@ -784,13 +784,16 @@ pub mod test_fns {
             if check_last_op {
                 let res = l.get_sp_exact(entry);
                 if entry == l.get_initial_entry_info() {
-                    assert_eq!(Err(LogError::IsInitSP), res);
+                    assert_eq!(LogError::IsInitSP, res.unwrap_err());
                 } else {
                     let (outer_sp, exact_op) = res.expect("unable to get sp exact");
                     // try to insert by exact
                     let sp_supported_info = outer_sp.sp.sp.supported_sp_info;
                     let sp_state = outer_sp.sp;
-                    let exact: Vec<_> = exact_op.into_iter().map(|op| op.into()).collect();
+                    let exact: Vec<_> = exact_op
+                        .into_iter()
+                        .map(|op| op.ptr.borrow().entry.get_entry_info())
+                        .collect();
                     let sp_ref = l.find_sp(sp_supported_info, None).unwrap().ptr;
                     let sp_ptr = sp_ref.borrow();
                     let prev_sp_log_index = sp_ptr.log_index;
@@ -1319,7 +1322,10 @@ pub(crate) mod tests {
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp1_ops.iter().zip(ops.iter()) {
-            assert_eq!(&op.ptr.as_ref().borrow().get_op_entry_info(), ifo);
+            assert_eq!(
+                &op.ptr.as_ref().borrow().entry,
+                &ifo.ptr.as_ref().borrow().entry
+            );
         }
         // be sure we dont insert the duplicate
         assert_eq!(
@@ -1343,7 +1349,7 @@ pub(crate) mod tests {
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp2_ops.iter().zip(ops.iter()) {
-            assert_eq!(&op.ptr.as_ref().borrow().get_op_entry_info(), ifo);
+            assert_eq!(op.ptr.borrow().entry, ifo.ptr.borrow().entry);
         }
 
         // add some more ops
@@ -1407,11 +1413,11 @@ pub(crate) mod tests {
         );
         ti.set_sp_time_valid(sp1.info.time);
 
-        l.check_sp(sp1, &[op1.get_entry_info()], &[], &ti).unwrap();
+        l.check_sp(sp1, &[(&op1).into()], &[], &ti).unwrap();
 
         // use both sp1 and sp2, using additional_ops input with to include sp1
         let op1_data = EntryInfoData {
-            info: op1.get_entry_info(),
+            info: (&op1).into(),
             data: get_empty_data(),
         };
         let sp1 = Sp::new(
@@ -1442,7 +1448,7 @@ pub(crate) mod tests {
                 let op = op_ref.entry.as_op();
                 if op.log_index % 2 == 0 {
                     // dont include the even ones
-                    return Some(op.op.get_entry_info());
+                    return Some((&op.op).into());
                 }
                 None
             })
@@ -1482,7 +1488,7 @@ pub(crate) mod tests {
         check_log_indicies(&mut l);
         assert_eq!(m_clone.len(), sp1_ops.len());
         for (ifo, hsh) in sp1_ops.iter().zip(m_clone) {
-            assert_eq!(hsh, ifo.hash);
+            assert_eq!(hsh, ifo.ptr.borrow().entry.get_hash());
         }
 
         // make an sp with the other items
@@ -1500,7 +1506,7 @@ pub(crate) mod tests {
         check_log_indicies(&mut l);
         assert_eq!(not_included.len(), sp2_ops.len());
         for (ifo, op) in sp2_ops.iter().zip(not_included.iter()) {
-            assert_eq!(op, &EntryInfo::from(ifo.clone()));
+            assert_eq!(op, &ifo.ptr.borrow().entry.get_entry_info());
         }
         // check the sp prev pointers
         check_sp_prev(&mut l, true);
@@ -1560,8 +1566,7 @@ pub(crate) mod tests {
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp1_ops.iter().zip([op1].iter()) {
-            assert_eq!(op.op.info, ifo.op.info);
-            assert_eq!(op.op.data, ifo.op.data);
+            assert_eq!(op, &ifo.ptr.borrow().entry.as_op().op);
         }
 
         let sp2 = Sp::new(
@@ -1572,13 +1577,12 @@ pub(crate) mod tests {
             sp1_info,
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let (outer_sp2, sp2_ops) = l.check_sp_exact(sp2, &[op2.get_entry_info()], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l.check_sp_exact(sp2, &[(&op2).into()], &ti).unwrap();
         assert_eq!(0, outer_sp2.not_included_ops.len());
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
         for (ifo, op) in sp2_ops.iter().zip([op2].iter()) {
-            assert_eq!(ifo.op.info, op.op.info);
-            assert_eq!(ifo.op.data, op.op.data);
+            assert_eq!(&ifo.ptr.borrow().entry.as_op().op, op);
         }
         // check the sp prev pointers
         check_sp_prev(&mut l, true);

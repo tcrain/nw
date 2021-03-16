@@ -13,7 +13,7 @@ use super::{
     basic_log::Log,
     entry::{LogEntry, LogEntryStrong, StrongPtrIdx},
     log_error::{LogError, Result},
-    op::{EntryInfo, Op, OpEntryInfo},
+    op::{EntryInfo, Op, OpEntryInfo, OpState},
     sp::{Sp, SpInfo, SpState},
 };
 
@@ -42,15 +42,15 @@ pub struct SpDetails {
 
 #[derive(Debug, Clone)]
 pub struct SpToProcess {
-    pub sp: SpCreated,
+    pub sp: Sp,
     pub not_included: Vec<EntryInfo>, // all operations with time less that the SP time that were not included
     pub late_included: Vec<EntryInfo>, // late operations that were included
 }
 
 #[derive(Debug, Clone)]
 pub struct SpExactToProcess {
-    pub sp: SpCreated,
-    pub exact: Vec<OpEntryInfo>,
+    pub sp: Sp,
+    pub exact: Vec<Op>,
 }
 
 #[derive(Clone)]
@@ -99,6 +99,28 @@ impl OpCreated {
             .deserialize(&self.0)
             .map_err(|err| LogError::EncodeError(EncodeError(err)))
     }
+
+    fn from_op<O: Options>(op: &Op, options: O) -> Result<OpCreated> {
+        let ser = options
+            .serialize(op)
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))?;
+        Ok(OpCreated(ser))
+    }
+
+    fn to_op_state<O: Options>(&self, options: O) -> Result<OpState> {
+        Ok(OpState {
+            hash: hash(&self.0),
+            op: self.to_op(options)?,
+        })
+    }
+
+    fn to_entry_info<O: Options>(&self, options: O) -> Result<EntryInfo> {
+        let op = self.to_op(options)?;
+        Ok(EntryInfo {
+            basic: op.info,
+            hash: hash(&self.0),
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -121,6 +143,14 @@ impl OpStatus {
             arrived_late,
         }
     }
+}
+
+fn to_op_entry_info(ops: &[StrongPtrIdx]) -> Vec<OpEntryInfo> {
+    let mut ser = vec![];
+    for op in ops {
+        ser.push(op.ptr.borrow().get_op_entry_info())
+    }
+    ser
 }
 
 impl<F: RWS> LocalLog<F> {
@@ -176,59 +206,54 @@ impl<F: RWS> LocalLog<F> {
         ti: &mut T,
         sp_p: SpToProcess,
     ) -> Result<(SpToProcess, SpDetails)> {
-        let sp = sp_p.sp.to_sp(self.l.serialize_option())?;
-        self.process_sp(ti, sp, &sp_p.late_included, &sp_p.not_included)
+        //  let sp = sp_p.sp.to_sp(self.l.serialize_option())?;
+        self.process_sp(ti, sp_p.sp, &sp_p.late_included, &sp_p.not_included)
     }
 
     pub fn received_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
         sp_p: SpExactToProcess,
-    ) -> Result<(SpToProcess, SpDetails)> {
-        let sp = sp_p.sp.to_sp(self.l.serialize_option())?;
-        for op in &sp_p.exact {
-            if let Err(e) = self.l.insert_op(op.op.clone(), ti) {
-                match e {
-                    LogError::OpAlreadyExists => (), // ok
+    ) -> Result<(Vec<OpEntryInfo>, SpToProcess, SpDetails)> {
+        let sp = sp_p.sp; //.to_sp(self.l.serialize_option())?;
+        let mut new_ops = vec![];
+        let mut all_ops = vec![];
+        for op in sp_p.exact.iter() {
+            match self.l.insert_op(op.clone(), ti) {
+                Err(e) => match e {
+                    LogError::OpAlreadyExists => {
+                        // the op already exists in the log
+                        all_ops.push(op.to_entry_info(self.serialize_option())?);
+                    }
                     _ => return Err(e),
+                },
+                Ok(op_ptr) => {
+                    let op_ptr = op_ptr.ptr.borrow();
+                    let op = op_ptr.entry.as_op();
+                    all_ops.push(op.into());
+                    new_ops.push(op.into())
                 }
             }
         }
-        let exact: Vec<_> = sp_p.exact.iter().map(|op| op.into()).collect();
-        self.process_sp_exact(ti, sp, &exact)
+        let (sp_p, sp_d) = self.process_sp_exact(ti, sp, &all_ops)?;
+        Ok((new_ops, sp_p, sp_d))
     }
 
-    pub fn get_sp_exact(&mut self, sp_c: SpCreated) -> Result<SpExactToProcess> {
-        let sp = sp_c.to_sp(self.l.serialize_option())?;
+    pub fn get_sp_exact(&mut self, sp: Sp) -> Result<SpExactToProcess> {
         let sp_s = SpState::from_sp(sp, self.l.serialize_option())?;
-        let (_, ops) = self.l.get_sp_exact(sp_s.get_entry_info())?;
+        let (o_sp, ops) = self.l.get_sp_exact(sp_s.get_entry_info())?;
+        let ops = ops
+            .iter()
+            .map(|ptr| ptr.ptr.borrow().entry.as_op().op.op.clone())
+            .collect();
         Ok(SpExactToProcess {
             exact: ops,
-            sp: sp_c,
+            sp: o_sp.sp.sp,
         })
-    }
-
-    fn get_sp_exact_to_process(
-        &self,
-        sp_ptr: &LogEntry,
-        exact: Vec<OpEntryInfo>,
-    ) -> SpExactToProcess {
-        let serialized = sp_ptr
-            .entry
-            .check_hash(self.l.serialize_option())
-            .expect("serialization and hash was checked in call to new_op");
-        SpExactToProcess {
-            exact,
-            sp: SpCreated(serialized),
-        }
     }
 
     fn get_sp_to_process(&self, sp_ptr: &LogEntry) -> SpToProcess {
         // let sp_ptr = sp.ptr.borrow();
-        let serialized = sp_ptr
-            .entry
-            .check_hash(self.l.serialize_option())
-            .expect("serialization and hash was checked in call to new_op");
         let new_sp = sp_ptr.entry.as_sp();
         let not_included = new_sp
             .not_included_ops
@@ -243,7 +268,7 @@ impl<F: RWS> LocalLog<F> {
         SpToProcess {
             not_included,
             late_included,
-            sp: SpCreated(serialized),
+            sp: sp_ptr.entry.as_sp().sp.sp.clone(),
         }
     }
 
@@ -270,7 +295,7 @@ impl<F: RWS> LocalLog<F> {
                     log_index: sp_ptr.log_index,
                     supported_sp_log_index: sp_ptr.entry.as_sp().supported_sp_log_index,
                 },
-                ops,
+                ops: to_op_entry_info(&ops),
             },
         ))
     }
@@ -299,7 +324,7 @@ impl<F: RWS> LocalLog<F> {
                     log_index: sp_ptr.log_index,
                     supported_sp_log_index: sp_ptr.entry.as_sp().supported_sp_log_index,
                 },
-                ops,
+                ops: to_op_entry_info(&ops),
             },
         ))
     }
@@ -384,7 +409,7 @@ impl<F: RWS> LocalLog<F> {
                     );
                     if op.op.op.info.time <= t {
                         if op.arrived_late {
-                            late_included.push(op.op.get_entry_info());
+                            late_included.push((&op.op).into());
                         }
                         return Some(op.op.hash);
                     }

@@ -144,15 +144,17 @@ impl OpState {
         Ok(OpState { op, hash })
     }
 
-    pub fn get_entry_info(&self) -> EntryInfo {
-        EntryInfo {
-            hash: self.hash,
-            basic: self.op.info,
-        }
-    }
-
     pub fn is_in_list(&self, list: &[EntryInfo]) -> bool {
-        list.binary_search(&self.get_entry_info()).is_ok()
+        list.binary_search(&self.into()).is_ok()
+    }
+}
+
+impl From<&OpState> for EntryInfo {
+    fn from(op_s: &OpState) -> Self {
+        EntryInfo {
+            hash: op_s.hash,
+            basic: op_s.op.info,
+        }
     }
 }
 
@@ -201,6 +203,17 @@ impl Op {
             },
             data,
         }
+    }
+
+    pub fn to_entry_info<O: Options>(&self, options: O) -> Result<EntryInfo> {
+        let enc = options
+            .serialize(&self)
+            .map_err(|err| LogError::EncodeError(EncodeError(err)))?;
+        let hash = verification::hash(&enc);
+        Ok(EntryInfo {
+            basic: self.info,
+            hash,
+        })
     }
 }
 

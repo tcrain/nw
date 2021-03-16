@@ -267,7 +267,7 @@ impl PrevEntry {
     pub fn get_entry_info(&self) -> EntryInfo {
         match self {
             PrevEntry::Sp(sp) => sp.sp.get_entry_info(),
-            PrevEntry::Op(op) => op.op.get_entry_info(),
+            PrevEntry::Op(op) => (&op.op).into(),
         }
     }
 
@@ -926,6 +926,25 @@ pub struct OuterOp {
 
 impl OuterOp {}
 
+impl From<&OuterOp> for OpEntryInfo {
+    fn from(o_op: &OuterOp) -> Self {
+        OpEntryInfo {
+            op: o_op.op.op.clone(),
+            hash: o_op.op.hash,
+            log_index: o_op.log_index,
+        }
+    }
+}
+
+impl From<&OuterOp> for EntryInfo {
+    fn from(o_op: &OuterOp) -> Self {
+        EntryInfo {
+            basic: o_op.op.op.info,
+            hash: o_op.op.hash,
+        }
+    }
+}
+
 /*
 impl PartialOrd for OuterOp {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
@@ -1002,7 +1021,7 @@ pub fn set_next_sp(
 }
 
 pub struct SpResult {
-    included: Vec<OpEntryInfo>,       // all ops that were included
+    included: Vec<StrongPtrIdx>,      // all ops that were included
     late_included: Vec<LogEntryKeep>, // ops that were late, but were still included
     not_included: Vec<LogEntryKeep>,  // ops that were on time, but were not included
     last_op: Option<LogEntryWeak>,    // op with largest time
@@ -1096,7 +1115,7 @@ impl OuterSp {
         exact: &[EntryInfo],
         first_op: Option<LogEntryWeak>,
         state: &mut LogState<F>,
-    ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
+    ) -> Result<(OuterSp, Vec<StrongPtrIdx>)> {
         // where to start the iterator from
         // create a total order iterator over the operations including the unused items from the previous
         // SP that takes the exact set from exact, and returns the rest as unused, until last_op
@@ -1142,7 +1161,7 @@ impl OuterSp {
         not_included: K,
         first_op: Option<LogEntryWeak>,
         state: &mut LogState<F>,
-    ) -> Result<(OuterSp, Vec<OpEntryInfo>)> {
+    ) -> Result<(OuterSp, Vec<StrongPtrIdx>)> {
         // where to start the iterator from
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
         // it uses included and not included to decide what operations to include
@@ -1267,7 +1286,7 @@ impl OuterSp {
             }
             let nxt_op_ptr = nxt_op.ptr.borrow();
             let nxt_op_op = nxt_op_ptr.entry.as_op();
-            included.push(nxt_op_ptr.get_op_entry_info());
+            included.push(nxt_op.clone());
             if nxt_op_op.arrived_late {
                 late_included.push((&nxt_op).into());
             }
