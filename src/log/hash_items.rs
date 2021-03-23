@@ -1,9 +1,12 @@
 use std::{cell::RefCell, rc::Rc};
 
+#[cfg(debug_assertions)]
+use std::rc::Weak;
+
 use rustc_hash::FxHashMap;
 
-pub const DEFAULT_DISK_ENTRIES: usize = 64;
-pub const DEFAULT_MAX_ENTRIES: usize = 64;
+pub const DEFAULT_DISK_ENTRIES: usize = 32; // the number of items loaded from the disk stored in memory
+pub const DEFAULT_MAX_ENTRIES: usize = 32; // the number of recent entries stored in memory
 
 #[inline(always)]
 fn is_pow2(x: usize) -> bool {
@@ -59,12 +62,25 @@ impl<T> HItems<T> {
         }
     }
 
+    /// Drops the oldest item contained, and returns it if there is one.
+    pub fn drop_entry(&mut self) -> (Option<Rc<RefCell<T>>>, Option<u64>) {
+        if self.map.is_empty() {
+            return (None, None);
+        }
+        let last = self.entries_id.len() + self.entries_idx;
+        let loc = modulo_pow2(last - self.map.len(), self.entries_id.len());
+        let id = self.entries_id[loc].take().unwrap();
+        let (idx, entry) = self.map.remove(&id).unwrap();
+        debug_assert_eq!(loc, idx);
+        (Some(entry), Some(id))
+    }
+
     pub fn entries_count(&self) -> usize {
         self.map.len()
     }
 
-    pub fn get(&self, id: u64) -> Option<&Rc<RefCell<T>>> {
-        self.map.get(&id).map(|e| &e.1)
+    pub fn get(&self, id: u64) -> Option<Rc<RefCell<T>>> {
+        self.map.get(&id).map(|e| e.1.clone())
     }
 
     /// store a log entry that was loaded from disk, up to num_disk_entries of items loaded from disk
@@ -89,7 +105,7 @@ impl<T> HItems<T> {
         self.entries_idx += 1;
         let l = self.entries_id.len();
         if self.entries_idx >= l {
-            self.entries_idx = modulo_pow2(self.entries_idx, l)
+            self.entries_idx = 0;
         }
         (ret.map(|(_, entry)| entry), old_id)
     }
@@ -100,6 +116,8 @@ pub struct HashItems<T> {
     recent_entries: HItems<T>,
     max_recent: u64,
     min_recent: Option<u64>,
+    #[cfg(debug_assertions)]
+    debug_entires: FxHashMap<u64, Weak<RefCell<T>>>,
 }
 
 impl<T> Default for HashItems<T> {
@@ -117,7 +135,24 @@ impl<T> HashItems<T> {
             recent_entries: HItems::new(num_recent_entries),
             max_recent: 0,
             min_recent: None,
+            #[cfg(debug_assertions)]
+            debug_entires: FxHashMap::default(),
         }
+    }
+
+    /// Drops the oldest recent entry, returns true if an entry was dropped,
+    /// otherwise the list was empty.
+    pub fn drop_entry(&mut self) -> Option<Rc<RefCell<T>>> {
+        let (ret, rem) = self.recent_entries.drop_entry();
+        if let Some(v) = rem {
+            if self.recent_entries.entries_count() == 0 {
+                self.min_recent = None;
+                self.max_recent = 0;
+            } else {
+                self.min_recent = Some(v + 1);
+            }
+        }
+        ret
     }
 
     pub fn clear(&mut self) {
@@ -135,7 +170,7 @@ impl<T> HashItems<T> {
         self.disk_entries.entries_count()
     }
 
-    pub fn get(&self, id: u64) -> Option<&Rc<RefCell<T>>> {
+    pub fn get(&self, id: u64) -> Option<Rc<RefCell<T>>> {
         if let Some(min) = self.min_recent {
             if id >= min && id <= self.max_recent {
                 let rc = self.recent_entries.get(id);
@@ -149,22 +184,36 @@ impl<T> HashItems<T> {
     /// store a log entry that was loaded from disk, up to num_disk_entries of items loaded from disk
     /// will be stored in the hash table
     pub fn store_from_disk(&mut self, id: u64, item: Rc<RefCell<T>>) -> Option<Rc<RefCell<T>>> {
+        if cfg!(debug_assertions) {
+            #[cfg(debug_assertions)]
+            if let Some(e) = self.debug_entires.get(&id) {
+                debug_assert!(e.upgrade().is_none());
+            }
+            #[cfg(debug_assertions)]
+            self.debug_entires.insert(id, Rc::downgrade(&item));
+        }
         self.disk_entries.store(id, item).0
     }
 
-    pub fn store_recent(
-        &mut self,
-        id: u64,
-        item: Rc<RefCell<T>>,
-    ) -> (Option<Rc<RefCell<T>>>, Option<u64>) {
+    /// Must be called in increasing order of id, keeps a fixed number of the most recelty added entries.
+    /// Returns the id the old entry that was removed if the vector was full.
+    pub fn store_recent(&mut self, id: u64, item: Rc<RefCell<T>>) -> Option<u64> {
+        if cfg!(debug_assertions) {
+            #[cfg(debug_assertions)]
+            debug_assert!(!self.debug_entires.contains_key(&id));
+            #[cfg(debug_assertions)]
+            self.debug_entires.insert(id, Rc::downgrade(&item));
+            debug_assert!(self.max_recent <= id);
+        }
         self.max_recent = id;
-        let (ret, rem) = self.recent_entries.store(id, item);
+        let (_, rem) = self.recent_entries.store(id, item);
         if let Some(v) = rem {
+            // the oldest value was removed
             self.min_recent = Some(v + 1);
         } else {
             self.min_recent.get_or_insert(id);
         }
-        (ret, rem)
+        rem
     }
 }
 
@@ -182,12 +231,38 @@ mod tests {
         Rc::new(RefCell::new(id))
     }
 
+    fn check_sorted(v: &[u64]) {
+        assert!(v.windows(2).all(|n| n[0] < n[1]));
+    }
+
+    fn check_valid(hi: &HashItems<u64>) {
+        let min_idx = hi.recent_entries.entries_idx;
+        let mut left = vec![];
+        let mut right = vec![];
+        for (i, nxt) in hi.recent_entries.entries_id.iter().enumerate() {
+            if let Some(v) = nxt {
+                if i < min_idx {
+                    left.push(*v);
+                } else {
+                    right.push(*v);
+                }
+            }
+        }
+        check_sorted(&left);
+        check_sorted(&right);
+
+        right.append(&mut left);
+        check_sorted(&right);
+
+        assert_eq!(hi.min_recent.as_ref(), right.get(0));
+    }
+
     #[test]
     fn append_recent() {
         let mut hi: HashItems<u64> = HashItems::new(16, 16);
         for i in 0..50 {
-            let (rep, rem) = hi.store_recent(i, new_id_ptr(i));
-            assert!(rep.is_none());
+            let rem = hi.store_recent(i, new_id_ptr(i));
+            check_valid(&hi);
             if i >= 16 {
                 assert_eq!(i - 16, rem.unwrap());
             }
@@ -202,6 +277,34 @@ mod tests {
             let count = hi.recent_entries_count();
             assert_eq!(cmp::min(i + 1, 16), count as u64);
         }
+    }
+
+    #[test]
+    fn drop_entry() {
+        let mut hi: HashItems<u64> = HashItems::new(16, 16);
+        let mut all_items = VecDeque::default();
+        for i in 0..50 {
+            let nxt = new_id_ptr(i);
+            all_items.push_back(nxt.clone());
+            let rem = hi.store_recent(i, nxt);
+            check_valid(&hi);
+            if let Some(rem) = rem {
+                assert_eq!(rem, *all_items.pop_front().unwrap().borrow());
+            }
+            if i % 2 == 0 {
+                let nxt = hi.drop_entry().unwrap();
+                check_valid(&hi);
+                let other = all_items.pop_front().unwrap();
+                assert!(Rc::ptr_eq(&nxt, &other));
+            }
+        }
+        while !all_items.is_empty() {
+            let other = *all_items.pop_front().unwrap().borrow();
+            let nxt = *hi.drop_entry().unwrap().borrow();
+            check_valid(&hi);
+            assert_eq!(other, nxt);
+        }
+        assert!(hi.drop_entry().is_none());
     }
 
     struct Queue {
@@ -237,6 +340,8 @@ mod tests {
         for _ in 1..100 {
             let nxt = rng.gen();
             let _ = hi.store_from_disk(nxt, new_id_ptr(nxt));
+            check_valid(&hi);
+
             let old_q = q.push(nxt);
 
             if let Some(v) = old_q {

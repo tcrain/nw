@@ -51,7 +51,7 @@ impl CursorSR {
 
 impl Default for CursorSR {
     fn default() -> Self {
-        CursorSR(Cursor::new(vec![0; crate::config::DEFAULT_BUF_SIZE]))
+        CursorSR(Cursor::new(vec![]))
     }
 }
 

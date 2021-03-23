@@ -11,7 +11,7 @@ use crate::{
 
 use super::{
     basic_log::Log,
-    entry::{LogEntry, LogEntryStrong, StrongPtrIdx},
+    entry::{LogEntry, LogEntryStrong, LogEntryWeak, OuterOp, StrongPtrIdx},
     log_error::{LogError, Result},
     op::{EntryInfo, Op, OpEntryInfo, OpState},
     sp::{Sp, SpInfo, SpState},
@@ -123,14 +123,14 @@ impl OpCreated {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpResult {
     pub create: OpCreated,
     pub status: OpStatus,
     pub info: OpEntryInfo,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpStatus {
     pub include_in_hash: bool,
     pub arrived_late: bool,
@@ -254,16 +254,17 @@ impl<F: RWS> LocalLog<F> {
 
     fn get_sp_to_process(&self, sp_ptr: &LogEntry) -> SpToProcess {
         // let sp_ptr = sp.ptr.borrow();
+        let state = self.l.get_log_state();
         let new_sp = sp_ptr.entry.as_sp();
         let not_included = new_sp
             .not_included_ops
             .iter()
-            .map(|op| op.get_ptr().borrow().entry.get_entry_info())
+            .map(|op| op.get_ptr(state).borrow().entry.get_entry_info())
             .collect();
         let late_included = new_sp
             .late_included
             .iter()
-            .map(|op| op.get_ptr().borrow().entry.get_entry_info())
+            .map(|op| op.get_ptr(state).borrow().entry.get_entry_info())
             .collect();
         SpToProcess {
             not_included,
@@ -339,27 +340,23 @@ impl<F: RWS> LocalLog<F> {
         let sp = {
             // compute the outer_sp in the seperate view so we dont have a ref when we perform insert_outer_sp, which will need to borrow as mut
             let t = ti.get_largest_sp_time();
-            let last_sp = self.l.find_sp(self.last_sp, None)?;
-            let last_sp_ref = last_sp.ptr.borrow();
-            let last_sp_entry = last_sp_ref.entry.as_sp();
-            debug!(
-                "\n\ncreate local sp time {}, last sp {}, {:?}, last op {:?}, not included: {:?}\n",
-                t,
-                last_sp_ref.log_index,
-                last_sp_ref.entry.get_entry_info(),
-                last_sp_entry.last_op.as_ref().map(|op| op
-                    .get_ptr(self.l.get_log_state_mut())
-                    .borrow()
-                    .entry
-                    .as_op()
-                    .op
-                    .clone()),
-                last_sp_entry
-                    .not_included_ops
-                    .iter()
-                    .map(|op| op.get_ptr().borrow().entry.as_op().op.op.clone())
-                    .collect::<Vec<Op>>()
-            );
+
+            let (last_sp, last_op, sp_entry_info): (LogEntryWeak, _, _) = {
+                let last_sp = self.l.find_sp(self.last_sp, None)?;
+                let last_sp_ref = last_sp.ptr.borrow();
+                let last_sp_entry = last_sp_ref.entry.as_sp();
+                debug!(
+                    "\n\ncreate local sp time {}, last sp {}, {:?}\n",
+                    t,
+                    last_sp_ref.log_index,
+                    last_sp_ref.entry.get_entry_info(),
+                );
+                (
+                    (&last_sp).into(),
+                    last_sp_entry.last_op.clone(),
+                    last_sp_ref.entry.get_entry_info(),
+                )
+            };
             // collect the operations later in the log that have time earlier in than last op
             // we will add these specifically as they would not be included normally as they
             // arrived late
@@ -367,10 +364,10 @@ impl<F: RWS> LocalLog<F> {
                 // last_sp_entry.last_op is only None if this is the initial SP
                 // in this case after_ops will be None the call to get_ops_after_iter
                 // will return all ops afterwards in the log
-                last_sp_entry.last_op.as_ref().map(|last_op| {
+                last_op.as_ref().map(|last_op| {
                     let mut last_strong: LogEntryStrong = last_op.into();
                     let largest_op = last_strong
-                        .get_ptr(self.l.get_log_state_mut())
+                        .get_ptr(self.l.get_log_state())
                         .borrow()
                         .entry
                         .get_entry_info();
@@ -379,30 +376,30 @@ impl<F: RWS> LocalLog<F> {
                     iter.next();
                     // take the entries that arrive late (i.e. are after sp.last_op in the log,
                     // and have smaller total order time)
-                    let mut late_items: Vec<StrongPtrIdx> = iter
-                        .filter(move |nxt_op| {
+                    let mut late_items: Vec<OuterOp> = iter
+                        .filter_map(move |nxt_op| {
                             let nxt_op_ptr = nxt_op.ptr.borrow();
-                            nxt_op_ptr.entry.get_entry_info() < largest_op
+                            if nxt_op_ptr.entry.get_entry_info() < largest_op
                                 && nxt_op_ptr.entry.as_op().arrived_late
+                            {
+                                Some(nxt_op_ptr.entry.as_op().clone())
+                            } else {
+                                None
+                            }
                         })
                         .collect();
-                    // they must be sorted since they will be moreded with the other iterators
-                    late_items.sort_by(|l, r| {
-                        l.ptr
-                            .borrow()
-                            .entry
-                            .as_op()
-                            .op
-                            .cmp(&r.ptr.borrow().entry.as_op().op)
-                    });
+                    // they must be sorted since they will be merged with the other iterators
+                    late_items.sort_by(|l, r| l.op.cmp(&r.op));
                     late_items
                 })
             };
-            let op_iter = last_sp_entry
-                .get_ops_after_iter(after_ops, self.l.get_first_op(), self.l.get_log_state_mut())?
-                .filter_map(|op_rc| {
-                    let op_ref = op_rc.ptr.borrow();
-                    let op = op_ref.entry.as_op();
+            let last_sp = last_sp.get_ptr(self.l.get_log_state());
+            let last_sp_ref = last_sp.borrow();
+            let op_iter = last_sp_ref
+                .entry
+                .as_sp()
+                .get_ops_after_iter(after_ops, self.l.get_first_op(), self.l.get_log_state())?
+                .filter_map(|op| {
                     debug!(
                         "add op to local sp: id {}, time {} , op: {:?}",
                         op.op.op.info.id, t, op
@@ -415,13 +412,7 @@ impl<F: RWS> LocalLog<F> {
                     }
                     None
                 });
-            Sp::new(
-                self.id,
-                t,
-                op_iter,
-                vec![],
-                last_sp_ref.entry.as_sp().sp.get_entry_info(),
-            )
+            Sp::new(self.id, t, op_iter, vec![], sp_entry_info)
         };
         self.process_sp(ti, sp, &late_included, &[])
     }

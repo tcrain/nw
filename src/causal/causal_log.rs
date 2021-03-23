@@ -286,7 +286,7 @@ impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
                 if err == CausalError::EntryAlreadyCommitted {
                     true
                 } else {
-                    panic!(err)
+                    panic!(format!("{:?}", err))
                 }
             }
         };
@@ -351,13 +351,6 @@ impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
     /// Called when an op is received.
     #[inline(always)]
     fn recv_op(&mut self, op: OpEntryInfo) -> ordered_log::Result<()> {
-        let op_idx = op.log_index;
-        if self.id == 0 {
-            println!("got op {}", op_idx);
-            if op_idx == 38 {
-                println!("{:?}", op);
-            }
-        }
         self.get_op(op)
             .and(Ok(()))
             .map_err(|e| OrderingError::Custom(Box::new(e)))

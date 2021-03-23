@@ -7,8 +7,8 @@ use std::{
 use bincode::{options, DefaultOptions, Options};
 use log::{error, info};
 
-use super::log_error::LogError;
 use super::log_error::Result;
+use super::log_error::{DeserializeError, LogError};
 use crate::errors::{EncodeError, LogIOError};
 use crate::rw_buf::RWS;
 
@@ -114,16 +114,19 @@ fn open_file(path: &Path, truncate: bool) -> Result<File> {
 }
 
 impl<F: RWS> LogFile<F> {
+    #[inline(always)]
     pub fn serialize_option(&self) -> DefaultOptions {
         self.options
     }
 
+    #[inline(always)]
     pub fn get_end_index(&self) -> u64 {
         self.end_idx
     }
 
     // should be called after reading or writing to ensure the indicies are not broked
-    fn check_file(&self) {
+    #[inline(always)]
+    fn check_file(&mut self) {
         if self.file_idx > self.end_idx {
             panic!("file idx past end idx");
         }
@@ -133,6 +136,10 @@ impl<F: RWS> LogFile<F> {
         if self.file_idx != self.end_idx && self.at_end {
             panic!("at end should be false");
         }
+        debug_assert_eq!(
+            self.file.file.seek(SeekFrom::Current(0)).unwrap(),
+            self.file_idx
+        );
     }
 
     pub fn read_u64(&mut self) -> Result<(u64, FileOpInfo)> {
@@ -146,6 +153,7 @@ impl<F: RWS> LogFile<F> {
         if self.file_idx == self.end_idx {
             self.at_end = true
         }
+        #[cfg(debug_assertions)]
         self.check_file();
         Ok((
             u64::from_ne_bytes(buf),
@@ -179,6 +187,7 @@ impl<F: RWS> LogFile<F> {
         if self.file_idx == self.end_idx {
             self.at_end = true;
         }
+        #[cfg(debug_assertions)]
         self.check_file();
         Ok(FileOpInfo {
             at_end: self.at_end,
@@ -196,6 +205,7 @@ impl<F: RWS> LogFile<F> {
         } else {
             self.at_end = false
         }
+        #[cfg(debug_assertions)]
         self.check_file();
         FileOpInfo {
             at_end: self.at_end,
@@ -212,6 +222,7 @@ impl<F: RWS> LogFile<F> {
         if self.at_end {
             self.end_idx += bytes_consumed
         }
+        #[cfg(debug_assertions)]
         self.check_file();
         FileOpInfo {
             at_end: self.at_end,
@@ -239,6 +250,8 @@ impl<F: RWS> LogFile<F> {
             LogError::IOError(LogIOError(err))
         })?;
         self.file_idx = idx;
+        #[cfg(debug_assertions)]
+        self.check_file();
         Ok(())
     }
 
@@ -281,7 +294,7 @@ impl<F: RWS> LogFile<F> {
         let e = self
             .options
             .deserialize_from(&mut self.file)
-            .map_err(|_err| LogError::DeserializeError)?;
+            .map_err(|err| LogError::DeserializeError(DeserializeError::new(err)))?;
         let info = self.after_read();
         Ok((info, e))
     }

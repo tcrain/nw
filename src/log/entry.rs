@@ -1,7 +1,6 @@
 use core::panic;
 use std::{
     cell::RefCell,
-    cmp::Ordering,
     fmt::{self, Debug, Display, Formatter},
     iter,
     rc::{Rc, Weak},
@@ -21,7 +20,6 @@ use super::{
     LogIdx,
 };
 use serde::{Deserialize, Serialize};
-
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogEntry {
     pub log_index: u64,
@@ -58,13 +56,6 @@ impl Drop for LogEntry {
 }
 
 impl LogEntry {
-    fn finish_deserialize<F: RWS>(&mut self, state: &mut LogState<F>) {
-        match &mut self.entry {
-            PrevEntry::Sp(sp) => sp.finish_deserialize(state),
-            PrevEntry::Op(_) => (),
-        }
-    }
-
     #[inline(always)]
     pub fn get_time(&self) -> Time {
         self.entry.get_entry_info().basic.time
@@ -79,10 +70,11 @@ impl LogEntry {
         }
     }
 
-    fn from_file<F: RWS>(idx: u64, state: &mut LogState<F>) -> Result<LogEntry> {
-        state.f.seek_to(idx)?;
+    fn from_file<F: RWS>(idx: u64, state: &LogState<F>) -> Result<LogEntry> {
+        let mut f = state.f.borrow_mut();
+        f.seek_to(idx)?;
         // first read the serialized bytes
-        let (entry_info, mut entry): (_, LogEntry) = state.f.read_log()?;
+        let (entry_info, mut entry): (_, LogEntry) = f.read_log()?;
         // sanity check
         if entry_info.start_location != entry.file_index {
             panic!("entry has an invlid file index")
@@ -90,20 +82,17 @@ impl LogEntry {
         // write the serialized size
         entry.ser_size = Some(entry_info.bytes_consumed);
         // check the hash of the internal operation
-        entry.entry.check_hash(state.f.serialize_option())?;
+        entry.entry.check_hash(f.serialize_option())?;
         // read the location of the previous log
-        let (prev_log, _) = state.f.read_u64()?;
+        let (prev_log, _) = f.read_u64()?;
         // read the location of the previous total order
-        let (prev_to, prev_to_info) = state.f.read_u64()?;
+        let (prev_to, _) = f.read_u64()?;
         // read the location of the next total order
-        let next_to = if !prev_to_info.at_end {
-            state.f.read_u64()?.0
-        } else {
-            0
-        };
+        let (next_to, _) = f.read_u64()?;
+
         // see if there is a next log entry
         let next_log = {
-            let info = state.f.check_index();
+            let info = f.check_index();
             if info.at_end {
                 // there is no next log
                 0
@@ -115,7 +104,6 @@ impl LogEntry {
         entry.to_pointers = to_pointers;
         let log_pointers = LogPointers::from_file_indicies(&entry, prev_log, next_log);
         entry.log_pointers = log_pointers;
-        entry.finish_deserialize(state);
         entry.check_valid();
         debug!("loaded from disk {}", entry.log_index);
         Ok(entry)
@@ -139,41 +127,77 @@ impl LogEntry {
     }
 
     // write pointers when the entry is first received, the next pointer in the total order should be unknown
-    pub fn write_pointers_initial<F: RWS>(&mut self, state: &mut LogState<F>) -> Result<()> {
-        // the entry is always added at the end of the log
-        state.f.seek_to_end();
+    pub fn write_pointers_initial<F: RWS>(
+        &mut self,
+        log_pointers: &StrongPointers,
+        to_pointers: &StrongPointers,
+        state: &LogState<F>,
+    ) -> Result<()> {
         // First update the previous' next total order pointer, which is at the end of the log where we are now
-        if self.log_index > 1 {
-            // log entry 1 does not havt to do this since there is no previous entry to update
-            match self.to_pointers.prev_to.as_mut() {
+        let mut f = state.f.borrow_mut();
+        debug!(
+            "write pointers at {}, end {}",
+            self.file_index,
+            f.get_end_index()
+        );
+
+        if cfg!(debug_assertions) {
+            // when debugging check the pointers and values in the log are what was expected
+            let (nxt_to_file_idx_disk, _prev_to_file_idx) = match to_pointers.prev.as_ref() {
                 Some(prev) => {
-                    let prev_ptr = prev.get_ptr(state);
-                    let prev_ref = prev_ptr.borrow_mut();
-                    if prev_ref.log_index == self.log_index - 1 {
-                        // if this is the previous entry in the log then we just write the next to pointer
-                        state.f.write_u64(self.file_index)?;
-                    } else {
-                        // the previous log entry is not the previous total order entry, so we seek to it
-                        state
-                            .f
-                            .seek_to(prev_ref.file_index + prev_ref.ser_size.unwrap() + 16)?;
-                        // now update the previous entries next to pointer
-                        state.f.write_u64(self.file_index)?;
-                        // go back to my location - 8, which is where the previous log entries' total order next pointer is
-                        state.f.seek_to(self.file_index - 8)?;
-                        // we write 0 since the previous log entry does not have a next total order value yet
-                        state.f.write_u64(0)?;
-                    }
+                    let prev_ref = prev.ptr.borrow_mut();
+                    debug_assert_eq!(prev_ref.file_index, prev.file_idx);
+                    // seek to the previous total order entry
+                    f.seek_to(prev_ref.file_index + prev_ref.ser_size.unwrap() + 16)?;
+                    let val = f.read_u64()?.0;
+                    f.seek_to_end();
+                    (val, prev_ref.file_index)
                 }
-                None => {
-                    // there is no previous total order entry, so just write 0
-                    state.f.write_u64(0)?;
+                None => (0, 0),
+            };
+            let (prev_to_file_idx_disk, _nxt_to_file_idx) = match to_pointers.next.as_ref() {
+                Some(nxt) => {
+                    let nxt_ref = nxt.ptr.borrow_mut();
+                    debug_assert_eq!(nxt_ref.file_index, nxt.file_idx);
+                    // seek to the previous total order entry
+                    f.seek_to(nxt_ref.file_index + nxt_ref.ser_size.unwrap() + 8)?;
+                    let val = f.read_u64()?.0;
+                    f.seek_to_end();
+                    (val, nxt_ref.file_index)
                 }
+                None => (0, 0),
+            };
+            if to_pointers.next.is_some() {
+                debug_assert_eq!(
+                    self.to_pointers.prev_to.as_ref().map_or(0, |p| p.file_idx),
+                    prev_to_file_idx_disk
+                );
+            }
+            if to_pointers.prev.is_some() {
+                debug_assert_eq!(
+                    self.to_pointers.next_to.as_ref().map_or(0, |n| n.file_idx),
+                    nxt_to_file_idx_disk
+                );
             }
         }
+
+        if self.log_index <= 1 {
+            // log entry 1 does not have to do this since there is no previous entry to update
+        } else if let Some(prev) = to_pointers.prev.as_ref() {
+            // the inital index does not track its next TO entry since we keep that in memory
+            let prev_ref = prev.ptr.borrow_mut();
+            debug_assert_eq!(prev_ref.file_index, prev.file_idx);
+            // seek to the previous total order entry
+            f.seek_to(prev_ref.file_index + prev_ref.ser_size.unwrap() + 16)?;
+
+            // now update the previous entries next log order pointer
+            f.write_u64(self.file_index)?;
+        }
+        // we append our entry at the end of the log
+        f.seek_to_end();
         // sanity check
-        {
-            let check = state.f.check_index();
+        if cfg!(debug_assertions) {
+            let check = f.check_index();
             if !check.at_end {
                 panic!("should be at the end of the file when writing new entries");
             }
@@ -182,30 +206,40 @@ impl LogEntry {
             }
         }
         // write my serialized bytes
-        let info = state.f.append_log(self)?;
+        let info = f.append_log(self)?;
         self.ser_size = Some(info.bytes_consumed); // keep the size of this entry in bytes
                                                    // write the location of the previous log entry
-        let prv_location = match self.log_pointers.get_prev(state) {
-            Some(prv) => prv.borrow().file_index,
+        let prv_location = match log_pointers.prev.as_ref() {
+            Some(prv) => prv.file_idx,
             None => 0,
         };
-        state.f.write_u64(prv_location)?;
-        // write the location of the previous total order
-        let prv_location = match self.to_pointers.get_prev_to(state) {
-            Some(prv) => prv.borrow().file_index,
-            None => 0,
-        };
-        state.f.write_u64(prv_location)?;
-        // now if we have another entry after us in the total order, we must update that entries' previous pointer
-        if let Some(mut nxt) = self.to_pointers.get_next_to_strong() {
-            let ntx_ptr = nxt.get_ptr(state);
-            let nxt_ref = ntx_ptr.borrow();
-            // the previous total order pointer is after the serialized entry and the previous log entry pointer
-            let nxt_prev_file = nxt_ref.file_index + nxt_ref.ser_size.unwrap() + 8;
-            state.f.seek_to(nxt_prev_file)?;
-            state.f.write_u64(self.file_index)?;
-            // f.seek_to_end();
+
+        // write the location of the previous log order entry
+        f.write_u64(prv_location)?;
+
+        // write the location of the previous total order entry
+        let prv_location = to_pointers.prev.as_ref().map_or(0, |prev| prev.file_idx);
+
+        f.write_u64(prv_location)?;
+
+        // now we write the location of the next total order pointer
+        match to_pointers.next.as_ref() {
+            Some(nxt) => {
+                // we have a nxt pointer so we write its location
+                let nxt_file_idx = nxt.file_idx;
+                f.write_u64(nxt_file_idx)?;
+                // now since we have an entry after us in the total order, we must update that entries' previous pointer
+                // the previous total order pointer is after the serialized entry and the previous log entry pointer
+                let nxt_prev_file = nxt_file_idx + nxt.ptr.borrow().ser_size.unwrap() + 8;
+                f.seek_to(nxt_prev_file)?;
+                f.write_u64(self.file_index)?;
+            }
+            None => {
+                // we have no nxt pointer, so we just write 0
+                f.write_u64(0)?;
+            }
         }
+
         Ok(())
     }
 
@@ -221,7 +255,7 @@ impl LogEntry {
         self.log_pointers.get_prev_strong()
     }
 
-    pub fn set_prev(&mut self, prv: Option<LogEntryStrong>) {
+    pub fn set_prev(&mut self, prv: Option<LogEntryWeak>) {
         self.log_pointers.prev_entry = prv;
     }
 }
@@ -337,10 +371,12 @@ impl TotalOrderPointers {
                         // we are not the first log entry
                         match entry.entry {
                             PrevEntry::Op(_) => None, // since an SP is always at index 0, then there is no previous
-                            PrevEntry::Sp(_) => Some(LogEntryWeak {
-                                file_idx: prev,
-                                ptr: Weak::default(),
-                            }), // the previous is the intitial SP
+                            PrevEntry::Sp(_) => {
+                                Some(LogEntryWeak {
+                                    file_idx: prev,
+                                    ptr: Weak::default(),
+                                }) // the previous is the intitial SP
+                            }
                         }
                     }
                 }
@@ -353,13 +389,28 @@ impl TotalOrderPointers {
         TotalOrderPointers { next_to, prev_to }
     }
 
+    pub fn check_ptrs<F: RWS>(&self, state: &LogState<F>) {
+        if let Some(prv) = self.get_prev_to(state) {
+            debug_assert_eq!(
+                self.prev_to.as_ref().unwrap().file_idx,
+                prv.borrow().file_index
+            );
+        }
+        if let Some(nxt) = self.get_next_to(state) {
+            debug_assert_eq!(
+                self.next_to.as_ref().unwrap().file_idx,
+                nxt.borrow().file_index
+            );
+        }
+    }
+
     #[inline(always)]
-    pub fn get_prev_to<F: RWS>(&self, state: &mut LogState<F>) -> Option<StrongPtr> {
+    pub fn get_prev_to<F: RWS>(&self, state: &LogState<F>) -> Option<StrongPtr> {
         self.prev_to.as_ref().map(|entry| entry.get_ptr(state))
     }
 
     #[inline(always)]
-    pub fn get_next_to<F: RWS>(&self, state: &mut LogState<F>) -> Option<StrongPtr> {
+    pub fn get_next_to<F: RWS>(&self, state: &LogState<F>) -> Option<StrongPtr> {
         self.next_to.as_ref().map(|entry| entry.get_ptr(state))
     }
 
@@ -374,43 +425,50 @@ impl TotalOrderPointers {
     }
 }
 
-pub fn set_next_total_order<F: RWS>(
-    prev: &StrongPtrIdx,
-    new_next: &StrongPtrIdx,
-    state: &mut LogState<F>,
-) {
-    match prev.ptr.borrow().to_pointers.next_to.as_ref() {
-        None => (),
-        Some(nxt) => {
-            new_next.ptr.borrow_mut().to_pointers.next_to = Some(nxt.clone());
-            nxt.get_ptr(state).borrow_mut().to_pointers.prev_to = Some(new_next.into());
-        }
-    };
-    new_next.ptr.borrow_mut().to_pointers.prev_to = Some(prev.into());
-    prev.ptr.borrow_mut().to_pointers.next_to = Some(new_next.into());
+pub struct StrongPointers {
+    pub prev: Option<StrongPtrIdx>,
+    pub next: Option<StrongPtrIdx>,
 }
 
-// Removes an item from the total order list
-/*pub fn drop_item_total_order(item: &LogEntryStrong) {
-    let prev_to = item.borrow().to_pointers.get_prev_to();
-    let next_to = item.borrow().to_pointers.get_next_to();
-    match next_to.as_ref() {
-        Some(nxt) => {
-            match prev_to.as_ref() {
-                None => nxt.borrow_mut().to_pointers.prev_to = None,
-                Some(prv) => {
-                    nxt.borrow_mut().to_pointers.prev_to = Some(Rc::downgrade(prv));
-                    prv.borrow_mut().to_pointers.next_to = Some(Rc::downgrade(nxt))
-                }
-            }
-        },
-        None => { // next is none
-            if let Some(prv) = prev_to.as_ref() {
-                prv.borrow_mut().to_pointers.next_to = None
-            }
+impl Default for StrongPointers {
+    fn default() -> Self {
+        StrongPointers {
+            prev: None,
+            next: None,
         }
     }
-}*/
+}
+
+pub fn set_to_pointers(to_pointers: &StrongPointers, new_item: &StrongPtrIdx) {
+    if let Some(prev) = to_pointers.prev.as_ref() {
+        prev.ptr.borrow_mut().to_pointers.next_to = Some(new_item.into());
+    }
+    new_item.ptr.borrow_mut().to_pointers.prev_to = to_pointers.prev.as_ref().map(|p| p.into());
+
+    if let Some(next) = to_pointers.next.as_ref() {
+        next.ptr.borrow_mut().to_pointers.prev_to = Some(new_item.into());
+    }
+    new_item.ptr.borrow_mut().to_pointers.next_to = to_pointers.next.as_ref().map(|n| n.into());
+}
+
+/// Updates the total order pointers and appends the new item at the end of the log.
+pub fn set_to_pointers_append_to_log<F: RWS>(
+    to_pointers: &StrongPointers,
+    log_pointers: &StrongPointers,
+    new_item: &StrongPtrIdx,
+    state: &LogState<F>,
+    // prev: &StrongPtrIdx,
+    // new_next: &StrongPtrIdx,
+    // state: &LogState<F>,
+) {
+    set_to_pointers(to_pointers, new_item);
+
+    new_item
+        .ptr
+        .borrow_mut()
+        .write_pointers_initial(&log_pointers, &to_pointers, state)
+        .unwrap();
+}
 
 pub type StrongPtr = Rc<RefCell<LogEntry>>;
 pub type WeakPtr = Weak<RefCell<LogEntry>>;
@@ -423,6 +481,24 @@ pub struct StrongPtrIdx {
 impl Debug for StrongPtrIdx {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl From<&LogEntryKeep> for StrongPtrIdx {
+    fn from(le: &LogEntryKeep) -> Self {
+        StrongPtrIdx {
+            file_idx: le.file_idx,
+            ptr: le.ptr.as_ref().unwrap().clone(),
+        }
+    }
+}
+
+impl From<&StrongPtr> for StrongPtrIdx {
+    fn from(pt: &StrongPtr) -> Self {
+        StrongPtrIdx {
+            file_idx: pt.borrow().file_index,
+            ptr: pt.clone(),
+        }
     }
 }
 
@@ -460,7 +536,7 @@ impl LogEntryKeep {
         self.ptr.as_ref().expect("should not be none")
     }
 
-    fn load_pointer<F: RWS>(&mut self, state: &mut LogState<F>) {
+    fn load_pointer<F: RWS>(&mut self, state: &LogState<F>) {
         self.ptr = Some(get_ptr(self.file_idx, state))
     }
 
@@ -558,10 +634,11 @@ impl PartialEq for LogEntryStrong {
     }
 }
 
-pub fn get_ptr<F: RWS>(file_idx: u64, state: &mut LogState<F>) -> StrongPtr {
+pub fn get_ptr<F: RWS>(file_idx: u64, state: &LogState<F>) -> StrongPtr {
     // check the map
-    match state.m.get(file_idx) {
-        Some(entry) => Rc::clone(entry),
+    let entry = state.m.borrow().get(file_idx);
+    match entry {
+        Some(entry) => entry,
         None => {
             // the entry must be loaded from the file
             debug!("load from disk at idx {}", file_idx);
@@ -569,7 +646,12 @@ pub fn get_ptr<F: RWS>(file_idx: u64, state: &mut LogState<F>) -> StrongPtr {
                 LogEntry::from_file(file_idx, state).expect("unable to load entry from file"),
             ));
             let ptr = Rc::clone(&entry);
-            if state.m.store_from_disk(file_idx, entry).is_some() {
+            if state
+                .m
+                .borrow_mut()
+                .store_from_disk(file_idx, entry)
+                .is_some()
+            {
                 panic!("found unexpected entry at file index");
             }
             ptr
@@ -608,7 +690,7 @@ impl LogEntryStrong {
     }
 
     #[inline(always)]
-    pub fn log_entry_keep<F: RWS>(&mut self, state: &mut LogState<F>) -> LogEntryKeep {
+    pub fn log_entry_keep<F: RWS>(&mut self, state: &LogState<F>) -> LogEntryKeep {
         LogEntryKeep {
             file_idx: self.file_idx,
             ptr: Some(self.get_ptr(state)),
@@ -616,7 +698,7 @@ impl LogEntryStrong {
     }
 
     #[inline(always)]
-    pub fn strong_ptr_idx<F: RWS>(&mut self, state: &mut LogState<F>) -> StrongPtrIdx {
+    pub fn strong_ptr_idx<F: RWS>(&mut self, state: &LogState<F>) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
             ptr: self.get_ptr(state),
@@ -624,7 +706,7 @@ impl LogEntryStrong {
     }
 
     #[inline(always)]
-    pub fn get_ptr<F: RWS>(&mut self, state: &mut LogState<F>) -> StrongPtr {
+    pub fn get_ptr<F: RWS>(&mut self, state: &LogState<F>) -> StrongPtr {
         if self.ptr.is_none() {
             self.ptr = Some(get_ptr(self.file_idx, state));
         }
@@ -739,21 +821,25 @@ impl LogEntryWeak {
         }
     }
 
-    fn as_log_entry_strong<F: RWS>(&self, state: &mut LogState<F>) -> LogEntryStrong {
+    pub fn get_file_index(&self) -> u64 {
+        self.file_idx
+    }
+
+    fn as_log_entry_strong<F: RWS>(&self, state: &LogState<F>) -> LogEntryStrong {
         LogEntryStrong {
             file_idx: self.file_idx,
             ptr: Some(self.get_ptr(state)),
         }
     }
 
-    pub fn to_strong_ptr_idx<F: RWS>(&self, state: &mut LogState<F>) -> StrongPtrIdx {
+    pub fn to_strong_ptr_idx<F: RWS>(&self, state: &LogState<F>) -> StrongPtrIdx {
         StrongPtrIdx {
             file_idx: self.file_idx,
             ptr: self.get_ptr(state),
         }
     }
 
-    pub fn get_ptr<F: RWS>(&self, state: &mut LogState<F>) -> StrongPtr {
+    pub fn get_ptr<F: RWS>(&self, state: &LogState<F>) -> StrongPtr {
         self.ptr
             .upgrade()
             .unwrap_or_else(|| get_ptr(self.file_idx, state))
@@ -797,7 +883,7 @@ impl Default for TotalOrderPointers {
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct LogPointers {
     pub next_entry: Option<LogEntryWeak>,
-    pub prev_entry: Option<LogEntryStrong>,
+    pub prev_entry: Option<LogEntryWeak>,
 }
 
 impl Default for LogPointers {
@@ -834,9 +920,9 @@ impl LogPointers {
         };
         let prev_log = if (prev == 0 && entry.log_index != 1) || prev > 0 {
             // if the prev file index is greater than 0, or if we are not the first log entry, then there is a previous
-            Some(LogEntryStrong {
+            Some(LogEntryWeak {
                 file_idx: prev,
-                ptr: None,
+                ptr: Weak::new(),
             })
         } else {
             // otherwise there is no previous log entry
@@ -848,15 +934,15 @@ impl LogPointers {
         }
     }
 
-    pub fn get_prev<F: RWS>(&mut self, state: &mut LogState<F>) -> Option<StrongPtr> {
+    pub fn get_prev<F: RWS>(&mut self, state: &LogState<F>) -> Option<StrongPtr> {
         self.prev_entry.as_mut().map(|entry| entry.get_ptr(state))
     }
 
     pub fn get_prev_strong(&self) -> Option<LogEntryStrong> {
-        self.prev_entry.clone()
+        self.prev_entry.as_ref().map(|entry| entry.into())
     }
 
-    pub fn get_next<F: RWS>(&self, state: &mut LogState<F>) -> Option<StrongPtr> {
+    pub fn get_next<F: RWS>(&self, state: &LogState<F>) -> Option<StrongPtr> {
         self.next_entry.as_ref().map(|entry| entry.get_ptr(state))
     }
 
@@ -870,51 +956,9 @@ impl LogPointers {
             .as_ref()
             .and_then(|entry| entry.get_prt_if_in_memory())
     }
-
-    // Drop the strong reference to the previous entry if there is one.
-    fn drop_prev(&mut self) -> Result<StrongPtr> {
-        if let Some(prev) = self.prev_entry.as_mut() {
-            return prev.drop_ptr();
-        }
-        Err(LogError::OpAlreadyDropped)
-    }
 }
 
-// drops the reference from the input entry, so it will be gc'd even if there is no next
-pub fn drop_self(entry: &mut LogEntryStrong) -> Result<StrongPtr> {
-    entry.drop_ptr()
-}
-
-// drops the strong reference to this entry from the next entry, so it will be GC'd.
-pub fn drop_entry(entry: &StrongPtrIdx) -> Result<StrongPtr> {
-    // unlink from the next in the log
-    if let Some(nxt) = entry.ptr.borrow().log_pointers.get_next_if_in_memory() {
-        return nxt.borrow_mut().log_pointers.drop_prev();
-    }
-    Err(LogError::OpAlreadyDropped)
-    /*
-    // unlink the adjacent nodes
-    drop_item_total_order(entry);
-    let (prev, next) = (entry.borrow().get_prev(), entry.borrow().get_next());
-    match next.as_ref() {
-        Some(nxt) => {
-            match prev.as_ref() {
-                None => nxt.borrow_mut().set_prev(None), // no prev, but a next
-                Some(prv) => { // both a prev and next
-                    nxt.borrow_mut().set_prev(Some(Rc::clone(prv)));
-                    prv.borrow_mut().set_next(Some(Rc::downgrade(nxt)));
-                }
-            }
-        },
-        None => { // no next, but a prev
-            if let Some(prv) = prev.as_ref() {
-                prv.borrow_mut().set_next(None)
-            }
-        }
-    }*/
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub struct OuterOp {
     pub log_index: u64,
     pub op: OpState,
@@ -945,49 +989,40 @@ impl From<&OuterOp> for EntryInfo {
     }
 }
 
-/*
-impl PartialOrd for OuterOp {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OuterOp {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.log_index.cmp(&other.log_index) {
-            Ordering::Greater => Ordering::Greater,
-            Ordering::Less => Ordering::Less,
-            Ordering::Equal => self.op.cmp(&other.op)
-        }
-    }
-}
-
-
-impl Eq for OuterOp {}
-
-impl PartialEq for OuterOp {
-    fn eq(&self, other: &Self) -> bool {
-        self.op == other.op && self.log_index == other.log_index
-    }
-}
-*/
-
 impl Display for OuterOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "Op(log_index: {}, op: {})", self.log_index, self.op.op)
     }
 }
 
-pub fn sort_by_entry(l: &StrongPtrIdx, r: &StrongPtrIdx) -> Ordering {
-    l.ptr
-        .borrow()
-        .entry
-        .get_entry_info()
-        .cmp(&r.ptr.borrow().entry.get_entry_info())
-}
-
 pub fn leq_by_entry(l: &StrongPtrIdx, r: &StrongPtrIdx) -> bool {
     l.ptr.borrow().entry.get_entry_info() <= r.ptr.borrow().entry.get_entry_info()
+}
+
+struct WeakToStrongIterRef<'a, F: RWS, J: Iterator<Item = &'a LogEntryWeak>> {
+    iter: J,
+    state: &'a LogState<F>,
+}
+
+impl<'a, F: RWS, J: Iterator<Item = &'a LogEntryWeak>> Iterator for WeakToStrongIterRef<'a, F, J> {
+    type Item = StrongPtrIdx;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|l| l.to_strong_ptr_idx(self.state))
+    }
+}
+
+struct WeakToStrongIter<'a, F: RWS, J: Iterator<Item = LogEntryWeak>> {
+    iter: J,
+    state: &'a LogState<F>,
+}
+
+impl<'a, F: RWS, J: Iterator<Item = LogEntryWeak>> Iterator for WeakToStrongIter<'a, F, J> {
+    type Item = StrongPtrIdx;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next().map(|l| l.to_strong_ptr_idx(self.state))
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
@@ -998,42 +1033,20 @@ pub struct OuterSp {
     // the ops before last_op in the log that are not included in the sp
     // (by definintion each is op.include_in_hash = true, but op.arrived_late may be true or false)
     // they include those not included from the previous Sps if they are still not included //TODO prevent this from getting too big
-    pub not_included_ops: Vec<LogEntryKeep>,
+    pub not_included_ops: Vec<LogEntryWeak>,
     // the ops were late, but were still included (by definition each is op.arrived_late = true)
-    pub late_included: Vec<LogEntryKeep>,
-    pub prev_sp: Option<LogEntryWeak>, // the previous sp in the total order in the log
-}
-
-// sets the next Sp in the total ordering of the log.
-pub fn set_next_sp(
-    prev_sp: &StrongPtrIdx,
-    old_next_sp: Option<&StrongPtrIdx>,
-    new_next: &StrongPtrIdx,
-) {
-    new_next.ptr.borrow_mut().entry.mut_as_sp().prev_sp = Some(prev_sp.into()); //Some(Rc::downgrade(prev_sp));
-    match old_next_sp {
-        None => (),
-        Some(old_next) => {
-            old_next.ptr.borrow_mut().entry.mut_as_sp().prev_sp = Some(new_next.into());
-            // Some(Rc::downgrade(new_next))
-        }
-    }
+    pub late_included: Vec<LogEntryWeak>,
+    // pub prev_sp: Option<LogEntryWeak>, // the previous sp that this entry supports
 }
 
 pub struct SpResult {
     included: Vec<StrongPtrIdx>,      // all ops that were included
-    late_included: Vec<LogEntryKeep>, // ops that were late, but were still included
-    not_included: Vec<LogEntryKeep>,  // ops that were on time, but were not included
+    late_included: Vec<LogEntryWeak>, // ops that were late, but were still included
+    not_included: Vec<LogEntryWeak>,  // ops that were on time, but were not included
     last_op: Option<LogEntryWeak>,    // op with largest time
 }
 
 impl OuterSp {
-    pub fn finish_deserialize<F: RWS>(&mut self, state: &mut LogState<F>) {
-        for nxt in self.not_included_ops.iter_mut() {
-            nxt.load_pointer(state);
-        }
-    }
-
     /// Returns an iterator that contains all operations that have not been included in this SP in the log.
     /// Used when creating a new local Sp.
     /// Starts from the last op of this iterator, and returns all ops after it in the log, or ops that were part of
@@ -1041,17 +1054,17 @@ impl OuterSp {
     /// first_op is the first operation in the log in total order (this is used only if this is the first SP)
     pub fn get_ops_after_iter<'a, F: RWS>(
         &'a self,
-        late_include: Option<Vec<StrongPtrIdx>>,
+        late_include: Option<Vec<OuterOp>>,
         first_op: Option<LogEntryWeak>,
-        state: &'a mut LogState<F>,
-    ) -> Result<Box<dyn Iterator<Item = StrongPtrIdx> + 'a>> {
-        let merge_fn = |x: &StrongPtrIdx, y: &StrongPtrIdx| {
-            x.ptr.borrow().entry.get_entry_info() <= y.ptr.borrow().entry.get_entry_info()
-        };
+        state: &'a LogState<F>,
+    ) -> Result<Box<dyn Iterator<Item = OuterOp> + 'a>> {
+        let merge_fn = |x: &OuterOp, y: &OuterOp| x.op <= y.op;
         // not_included_iter are the items before self.last_op that were not included
         // log_iter are the items that have larger time and are later in the log than self.last_op
         // late_include are the items after self.last_op in the log that arrived late
         let (not_included_iter, log_iter) = self.get_iters(first_op, state)?;
+        let not_included_iter = not_included_iter.map(|nxt| nxt.ptr.borrow().entry.as_op().clone());
+        let log_iter = log_iter.map(|nxt| nxt.ptr.borrow().entry.as_op().clone());
         match late_include {
             Some(late) => {
                 let iter = not_included_iter
@@ -1069,16 +1082,16 @@ impl OuterSp {
     /// This starts from last_op, going backwards in a total order, collecting the ops that match
     /// that match those in exact or extra_info.
     /// It returns an iterator of those ops in increasing sorted order.
-    fn get_early_ops<I, J, F: RWS>(
-        &self,
+    fn get_early_ops<'a, I, J, F: RWS>(
+        &'a self,
         last_op: StrongPtrIdx,
         exact: I,
         extra_info: J,
-        state: &mut LogState<F>,
-    ) -> impl Iterator<Item = StrongPtrIdx>
+        state: &'a LogState<F>,
+    ) -> impl Iterator<Item = StrongPtrIdx> + 'a
     where
-        I: Iterator<Item = EntryInfo>,
-        J: Iterator<Item = EntryInfoData>,
+        I: Iterator<Item = EntryInfo> + 'a,
+        J: Iterator<Item = EntryInfoData> + 'a,
     {
         let filter_fn = |(supported, op)| match supported {
             Supported::Supported => Some(op),
@@ -1094,15 +1107,18 @@ impl OuterSp {
             Some(late_min) => {
                 // go backwards until late_min is reached collecting the items, sorting them
                 // and filtering only the ones that are part of exact or extra_info
-                let mut entries: Vec<_> = total_order_iterator(&last_op.into(), false, state)
-                    .take_while(|nxt| {
-                        let nxt_entry = nxt.ptr.borrow().entry.get_entry_info();
-                        nxt_entry >= late_min
-                    })
-                    .collect();
-                entries.sort_by(sort_by_entry); // TODO use different sorting, since should be in reserse for timsort?
-                total_order_prev_iterator(entries.into_iter(), exact, extra_info)
-                    .filter_map(filter_fn)
+                let mut entries: Vec<(LogEntryWeak, EntryInfo)> =
+                    total_order_iterator(&last_op.into(), false, state)
+                        .take_while(|nxt| nxt.ptr.borrow().entry.get_entry_info() >= late_min)
+                        .map(|nxt| ((&nxt).into(), nxt.ptr.borrow().entry.get_entry_info()))
+                        .collect();
+                entries.sort_by(|(_, l), (_, r)| l.cmp(r)); // TODO use different sorting, since should be in reserse for timsort?
+                let entries_iter = WeakToStrongIter {
+                    iter: entries.into_iter().map(|(nxt, _)| nxt),
+                    state,
+                };
+
+                total_order_prev_iterator(entries_iter, exact, extra_info).filter_map(filter_fn)
             }
         }
     }
@@ -1114,7 +1130,7 @@ impl OuterSp {
         new_sp: SpState,
         exact: &[EntryInfo],
         first_op: Option<LogEntryWeak>,
-        state: &mut LogState<F>,
+        state: &LogState<F>,
     ) -> Result<(OuterSp, Vec<StrongPtrIdx>)> {
         // where to start the iterator from
         // create a total order iterator over the operations including the unused items from the previous
@@ -1135,7 +1151,6 @@ impl OuterSp {
                 last_op: sp_result.last_op,
                 not_included_ops: sp_result.not_included,
                 late_included: sp_result.late_included,
-                prev_sp: None,
                 supported_sp_log_index: Some(my_log_idx),
             },
             sp_result.included,
@@ -1160,7 +1175,7 @@ impl OuterSp {
         late_included: &[EntryInfo],
         not_included: K,
         first_op: Option<LogEntryWeak>,
-        state: &mut LogState<F>,
+        state: &LogState<F>,
     ) -> Result<(OuterSp, Vec<StrongPtrIdx>)> {
         // where to start the iterator from
         // create a total order iterator over the operations of the log including the operations not included in thre previous sp
@@ -1169,6 +1184,7 @@ impl OuterSp {
         // SP in the log
         let last_op = self.get_last_op(first_op.clone(), state)?;
         let extra_info = new_sp.sp.additional_ops.iter().cloned();
+        // early ops are those smaller than last_op, but are included in either late_included or extra_info
         let early_ops =
             self.get_early_ops(last_op, late_included.iter().cloned(), extra_info, state);
 
@@ -1188,7 +1204,6 @@ impl OuterSp {
                 last_op: sp_result.last_op,
                 not_included_ops: sp_result.not_included,
                 late_included: sp_result.late_included,
-                prev_sp: None,
                 supported_sp_log_index: Some(my_log_idx),
             },
             sp_result.included,
@@ -1200,7 +1215,7 @@ impl OuterSp {
     fn get_last_op<F: RWS>(
         &self,
         first_op: Option<LogEntryWeak>,
-        state: &mut LogState<F>,
+        state: &LogState<F>,
     ) -> Result<StrongPtrIdx> {
         let last_op = self.last_op.as_ref().or_else(|| first_op.as_ref());
         Ok(last_op
@@ -1218,19 +1233,19 @@ impl OuterSp {
         &'a self,
         // late_min: Option<EntryInfo>,
         first_op: Option<LogEntryWeak>,
-        state: &'a mut LogState<F>,
+        state: &'a LogState<F>,
     ) -> Result<(
         impl Iterator<Item = StrongPtrIdx> + 'a,
-        TotalOrderAfterIter<F>,
+        TotalOrderAfterIter<'a, F>,
     )> {
         // we make an iterator that goes through the log in total order
         // the iterator starts from the log entry of the last op included in the previous SP (self) and traverses the log
         // from there in total order, returning the entries that occur later in the log, plus the ops that are in the
         // not_included list of the previous SP.
-        let not_included_iter = self
-            .not_included_ops
-            .iter()
-            .map(|nxt| StrongPtrIdx::new(nxt.file_idx, Rc::clone(nxt.ptr.as_ref().unwrap())));
+        let not_included_iter = WeakToStrongIterRef {
+            iter: self.not_included_ops.iter(),
+            state,
+        };
         // items from previous sp that are earlier in the log, we need to check if these are included
         // we only want operations after the last op of the previous sp in the log
         let last_op = self.get_last_op(first_op, state)?;
@@ -1313,10 +1328,6 @@ impl OuterSp {
             Err(LogError::SpHashNotComputed)
         }
     }
-
-    pub fn get_prev_sp(&self) -> Option<LogEntryStrong> {
-        self.prev_sp.as_ref().map(|prv| prv.into())
-    }
 }
 
 impl Display for OuterSp {
@@ -1334,7 +1345,7 @@ impl Debug for OuterSp {
 pub fn total_order_iterator<'a, F: RWS>(
     start: &LogEntryStrong,
     forward: bool,
-    state: &'a mut LogState<F>,
+    state: &'a LogState<F>,
 ) -> TotalOrderIterator<'a, F> {
     TotalOrderIterator {
         prev_entry: Some(start.clone()),
@@ -1346,7 +1357,7 @@ pub fn total_order_iterator<'a, F: RWS>(
 pub struct TotalOrderIterator<'a, F: RWS> {
     pub prev_entry: Option<LogEntryStrong>,
     pub forward: bool,
-    pub state: &'a mut LogState<F>,
+    pub state: &'a LogState<F>,
 }
 
 impl<'a, F: RWS> Iterator for TotalOrderIterator<'a, F> {
@@ -1388,8 +1399,9 @@ pub struct TotalOrderAfterIter<'a, F: RWS> {
     include_late: bool,
 }
 
-// instead collect the exact set of early ones in a vec before so we only include those (instead of going backwards)
-
+// instead collect the exact set of early ones in a vec before so we only include those (instead of going backwards)?
+/// TODO do we need to check all these things (min_index, min_entry) or is just one sufficient since we are going
+/// in a total order.
 impl<'a, F: RWS> Iterator for TotalOrderAfterIter<'a, F> {
     type Item = StrongPtrIdx;
 
@@ -1416,7 +1428,7 @@ impl<'a, F: RWS> Iterator for TotalOrderAfterIter<'a, F> {
 pub fn total_order_after_late_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
     // late_min: Option<EntryInfo>,
-    state: &'a mut LogState<F>,
+    state: &'a LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
     // if prev sp is not the inital SP, then we need to move forward 1 op since last op was already included in prev sp
     let min_index = start.ptr.borrow().log_index + 1;
@@ -1433,7 +1445,7 @@ pub fn total_order_after_late_iter<'a, F: RWS>(
 /// This is the same as a total order iterator from start.
 pub fn total_order_after_all_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
-    state: &'a mut LogState<F>,
+    state: &'a LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
     TotalOrderAfterIter {
         iter: total_order_iterator(&start.into(), true, state),
@@ -1446,7 +1458,7 @@ pub fn total_order_after_all_iter<'a, F: RWS>(
 /// Returns an total order iterator that returns start and items larger than start AND are after start in the log.
 pub fn total_order_after_iter<'a, F: RWS>(
     start: &StrongPtrIdx,
-    state: &'a mut LogState<F>,
+    state: &'a LogState<F>,
 ) -> TotalOrderAfterIter<'a, F> {
     TotalOrderAfterIter {
         iter: total_order_iterator(&start.into(), true, state),
@@ -1844,7 +1856,7 @@ impl<'a, F: RWS> Iterator for LogOpIterator<'a, F> {
 /// Used to iterate the log in the order entries were added to the log.
 pub struct LogIterator<'a, F: RWS> {
     prv_entry: Option<StrongPtrIdx>,
-    state: &'a mut LogState<F>,
+    state: &'a LogState<F>,
     forward: bool,
 }
 
@@ -1853,7 +1865,7 @@ impl<'a, F: RWS> LogIterator<'a, F> {
     /// Moves either forward or backward in the log in the order entries were added.
     pub(crate) fn new(
         prv_entry: Option<StrongPtrIdx>,
-        state: &'a mut LogState<F>,
+        state: &'a LogState<F>,
         forward: bool,
     ) -> LogIterator<'a, F> {
         LogIterator {
@@ -1911,14 +1923,21 @@ mod tests {
     };
 
     use super::{
-        LogEntry, LogEntryKeep, LogEntryStrong, LogEntryWeak, LogPointers, OuterOp, OuterSp,
-        PrevEntry, StrongPtr, TotalOrderPointers,
+        set_to_pointers, LogEntry, LogEntryKeep, LogEntryStrong, LogEntryWeak, LogPointers,
+        OuterOp, OuterSp, PrevEntry, StrongPointers, StrongPtr, StrongPtrIdx, TotalOrderPointers,
     };
 
     fn to_log_entry_weak(ptr: Option<&StrongPtr>) -> Option<LogEntryWeak> {
         ptr.map(|nxt| LogEntryWeak {
             file_idx: nxt.borrow().file_index,
             ptr: Rc::downgrade(nxt),
+        })
+    }
+
+    fn to_log_strong_ptr_idx(ptr: Option<&StrongPtr>) -> Option<StrongPtrIdx> {
+        ptr.map(|nxt| StrongPtrIdx {
+            file_idx: nxt.borrow().file_index,
+            ptr: Rc::clone(nxt),
         })
     }
 
@@ -1935,7 +1954,7 @@ mod tests {
         next_to: Option<&StrongPtr>,
         prev_log: Option<&StrongPtr>,
         next_log: Option<&StrongPtr>,
-    ) -> StrongPtr {
+    ) -> (StrongPtr, StrongPointers, StrongPointers) {
         let file_index = match prev_log {
             None => 0,
             Some(prv) => prv.borrow().ser_size.unwrap() + prv.borrow().file_index + 24,
@@ -1950,7 +1969,7 @@ mod tests {
             entry,
             log_pointers: LogPointers {
                 next_entry: to_log_entry_weak(next_log),
-                prev_entry: to_log_entry_strong(prev_log),
+                prev_entry: to_log_entry_weak(prev_log),
             },
             to_pointers: TotalOrderPointers {
                 next_to: to_log_entry_weak(next_to),
@@ -1958,13 +1977,22 @@ mod tests {
             },
             ser_size: None,
         }));
+        // update the log pointers
         if let Some(prev) = prev_log {
             prev.borrow_mut().log_pointers.next_entry = to_log_entry_weak(Some(&log_entry));
         }
-        if let Some(prev) = prev_to {
-            prev.borrow_mut().to_pointers.next_to = to_log_entry_weak(Some(&log_entry));
-        }
-        log_entry
+        let to_pointers = StrongPointers {
+            prev: prev_to.map(|p| p.into()),
+            next: next_to.map(|n| n.into()),
+        };
+        let log_pointers = StrongPointers {
+            prev: prev_log.map(|p| p.into()),
+            next: next_log.map(|n| n.into()),
+        };
+        // update the TO pionters
+        set_to_pointers(&to_pointers, &(&log_entry).into());
+        // return
+        (log_entry, to_pointers, log_pointers)
     }
 
     fn make_outer_op<F: RWS>(
@@ -1988,7 +2016,7 @@ mod tests {
     fn make_outer_sp<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
-        state: &mut LogState<F>,
+        state: &LogState<F>,
         prev_sp: Option<&LogEntryKeep>,
         last_op: Option<&LogEntryKeep>,
         not_included_ops: Vec<LogEntryKeep>,
@@ -2017,20 +2045,22 @@ mod tests {
                 .map(|op| op.get_ptr().borrow().entry.get_entry_info().hash),
             vec![],
             prev_sp_info,
-            state.f.serialize_option(),
+            state.f.borrow().serialize_option(),
         )
         .unwrap();
         let outer_sp = OuterSp {
             sp: sp_state,
             last_op: last_op.map(|op| op.into()),
-            not_included_ops,
+            not_included_ops: not_included_ops.iter().map(|op| op.into()).collect(),
             late_included: vec![],
-            prev_sp: None, // prev_sp.as_ref().map(|op| op.to_log_entry_weak()),
+            // prev_sp: None, // prev_sp.as_ref().map(|op| op.to_log_entry_weak()),
             supported_sp_log_index: prev_sp_log_index,
         };
         let entry = PrevEntry::Sp(outer_sp);
-        entry.check_hash(state.f.serialize_option()).unwrap();
-        let log_entry = make_log_entry(
+        entry
+            .check_hash(state.f.borrow().serialize_option())
+            .unwrap();
+        let (log_entry, to_pointers, log_pointers) = make_log_entry(
             entry,
             prev_sp.map(|sp| sp.get_ptr()),
             None,
@@ -2039,9 +2069,13 @@ mod tests {
         );
         log_entry
             .borrow_mut()
-            .write_pointers_initial(state)
+            .write_pointers_initial(&log_pointers, &to_pointers, state)
             .unwrap();
-        state.f.seek_to(log_entry.borrow().file_index).unwrap();
+        state
+            .f
+            .borrow_mut()
+            .seek_to(log_entry.borrow().file_index)
+            .unwrap();
         let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, state).unwrap();
         assert_eq!(*log_entry.borrow(), deser_log_entry);
         // be sure we can read the not included ops
@@ -2053,10 +2087,10 @@ mod tests {
             .iter()
             .zip(deser_log_entry.entry.as_sp().not_included_ops.iter())
         {
-            assert_eq!(*op1.get_ptr().borrow(), *op2.get_ptr().borrow());
+            assert_eq!(*op1.get_ptr(state).borrow(), *op2.get_ptr(state).borrow());
         }
 
-        state.m.clear();
+        state.m.borrow_mut().clear();
         let file_idx = log_entry.borrow().file_index;
         LogEntryKeep {
             file_idx,
@@ -2067,35 +2101,52 @@ mod tests {
     fn make_op<F: RWS>(
         id: Id,
         ti: &mut TimeTest,
-        state: &mut LogState<F>,
+        state: &LogState<F>,
         log_entry: StrongPtr,
         prev_to: Option<StrongPtr>,
     ) -> LogEntryKeep {
-        let op = make_outer_op(id, log_entry.borrow().log_index + 1, ti, &state.f);
-        let log_entry = make_log_entry(op, prev_to.as_ref(), None, Some(&log_entry), None);
+        let op = make_outer_op(id, log_entry.borrow().log_index + 1, ti, &state.f.borrow());
+        let next_to = prev_to
+            .as_ref()
+            .and_then(|p| p.borrow().to_pointers.get_next_to(state));
+        let (log_entry, to_pointers, log_pointers) = make_log_entry(
+            op,
+            prev_to.as_ref(),
+            next_to.as_ref(),
+            Some(&log_entry),
+            None,
+        );
         debug!(
             "new file index {}, log index {}",
             log_entry.borrow().file_index,
             log_entry.borrow().log_index
         );
-        state.f.seek_to(log_entry.borrow().file_index - 8).unwrap();
-        debug_assert!(state.f.check_index().at_end);
+        state
+            .f
+            .borrow_mut()
+            .seek_to(log_entry.borrow().file_index)
+            .unwrap();
+        debug_assert!(state.f.borrow().check_index().at_end);
         log_entry
             .borrow_mut()
-            .write_pointers_initial(state)
+            .write_pointers_initial(&log_pointers, &to_pointers, state)
             .unwrap();
         debug!("entry size {}", log_entry.borrow().ser_size.unwrap());
-        state.f.seek_to(log_entry.borrow().file_index).unwrap();
+        state
+            .f
+            .borrow_mut()
+            .seek_to(log_entry.borrow().file_index)
+            .unwrap();
         let deser_log_entry = LogEntry::from_file(log_entry.borrow().file_index, state).unwrap();
         assert_eq!(*log_entry.borrow(), deser_log_entry);
         // check that the prev to next to pointer is correct
         if let Some(prv) = prev_to {
             let deser_prev_to = LogEntry::from_file(prv.borrow().file_index, state).unwrap();
             assert_eq!(*prv.borrow(), deser_prev_to);
-            debug!("prv after: {}, deser prv: {}", prv.borrow(), deser_prev_to)
+            debug!("prv after: {}, deser prv: {}", prv.borrow(), deser_prev_to);
         }
         let file_idx = log_entry.borrow().file_index;
-        state.m.clear();
+        state.m.borrow_mut().clear();
         LogEntryKeep {
             file_idx,
             ptr: Some(log_entry),
@@ -2104,46 +2155,34 @@ mod tests {
 
     #[test]
     fn serialize_entry() {
-        let f = open_log_file("log_files/entry_log0.log", true, FileSR::new).unwrap();
+        let f = RefCell::new(open_log_file("log_files/entry_log0.log", true, FileSR::new).unwrap());
         let mut ti = TimeTest::new();
         let id = 0;
-        let m = HashItems::default();
-        let mut state = LogState { m, f };
+        let m = RefCell::new(HashItems::default());
+        let state = LogState { m, f };
 
         // insert the inital sp
-        let mut log_entry = make_outer_sp(id, &mut ti, &mut state, None, None, vec![]);
+        let mut log_entry = make_outer_sp(id, &mut ti, &state, None, None, vec![]);
         let last_sp = log_entry.clone();
         let mut prev_to = None;
         let mut op_vec = vec![];
         // insert 10 ops
         for _ in 0..10 {
-            log_entry = make_op(
-                id,
-                &mut ti,
-                &mut state,
-                Rc::clone(log_entry.get_ptr()),
-                prev_to,
-            );
+            log_entry = make_op(id, &mut ti, &state, Rc::clone(log_entry.get_ptr()), prev_to);
             prev_to = Some(Rc::clone(log_entry.get_ptr()));
             op_vec.push(log_entry.clone());
-            state.m.clear();
+            state.m.borrow_mut().clear();
         }
         // insert an op that uses a different total order
         prev_to = Some(Rc::clone(op_vec[0].get_ptr()));
-        log_entry = make_op(
-            id,
-            &mut ti,
-            &mut state,
-            Rc::clone(log_entry.get_ptr()),
-            prev_to,
-        );
-        state.m.clear();
+        log_entry = make_op(id, &mut ti, &state, Rc::clone(log_entry.get_ptr()), prev_to);
+        state.m.borrow_mut().clear();
 
         // check sp deserialization that includes the ops
         make_outer_sp(
             id,
             &mut ti,
-            &mut state,
+            &state,
             Some(&last_sp),
             Some(&log_entry),
             op_vec,

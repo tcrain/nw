@@ -174,6 +174,18 @@ impl TimeTest {
         }
     }
 
+    pub fn increase_time_by(&mut self, v: u64) {
+        self.last_time += v as u128;
+    }
+
+    pub fn get_time(&self) -> Time {
+        self.last_time
+    }
+
+    pub fn set_time(&mut self, t: Time) {
+        self.last_time = t;
+    }
+
     pub fn set_current_time_valid(&mut self) {
         self.last_time += INCLUDE_IN_HASH_TIMEOUT + 10;
     }

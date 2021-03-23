@@ -601,7 +601,7 @@ pub mod test_structs {
     use log::debug;
     use rand::{
         distributions::Standard,
-        prelude::{Distribution, StdRng},
+        prelude::{Distribution, SliceRandom, StdRng},
         Rng, SeedableRng,
     };
 
@@ -726,6 +726,195 @@ pub mod test_structs {
                 ti.set_sp_time_valid(sp.sp.info.time);
                 l.received_sp_exact(sp.clone(), ti).unwrap();
             }
+        }
+    }
+
+    /// Run a test exampe of ordered logs, where they all proceede at similar speeds.
+    pub fn run_ordered_standard<L: OrderedLog, S: OrderedState>(
+        logs: &mut [(OrderedLogRun<L, S>, TimeTest)],
+        num_ops: usize,
+        iterations: usize,
+        seed: u64,
+    ) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let num_logs = logs.len();
+
+        // an extra iteration is run at the end that creates an SP at a later time to ensure all nodes have
+        // the same state
+        for i in 0..=iterations {
+            let mut ops: Vec<Vec<OpResult>> = vec![Vec::default(); num_logs];
+            let mut sps: Vec<Vec<SpToProcess>> = vec![Vec::default(); num_logs];
+
+            // first compute how many ops each log will create
+            // we don't create ops in the last iteration, since we just want to supports
+            // any remaining ops with Sps
+            if i < iterations {
+                let op_count = (0..num_logs)
+                    .into_iter()
+                    .map(|_| rng.gen_range(0..=num_ops))
+                    .enumerate();
+                for (id, count) in op_count {
+                    let (l, ti) = &mut logs[id];
+                    debug!("Creating {} ops at node {}", count, id);
+                    for _ in 0..count {
+                        let new_op = l.new_op(ti).unwrap();
+                        for (j, ops) in ops.iter_mut().enumerate() {
+                            if j == id {
+                                continue;
+                            }
+                            ops.push(new_op.clone())
+                        }
+                    }
+                }
+            }
+            let mut sps_created = HashSet::new();
+            let mut sps_processed: HashMap<Id, usize> =
+                (0..num_logs).into_iter().map(|i| (i as Id, 0)).collect();
+            // the function returns true when all logs have processes num_logs Sps
+            let done_sp_process = |count: &mut HashMap<Id, usize>| {
+                for id in 0..num_logs as Id {
+                    if *count.get(&id).unwrap() < num_logs - 1 {
+                        return false;
+                    }
+                }
+                true
+            };
+            // the function returns true when all ops have been processed
+            let done_op_process = |ops: &Vec<Vec<OpResult>>| {
+                for nxt in ops {
+                    if !nxt.is_empty() {
+                        return false;
+                    }
+                }
+                true
+            };
+
+            while !done_sp_process(&mut sps_processed) || !done_op_process(&ops) {
+                // Now process the ops at the node
+                for (ref mut ops, (l, ti)) in ops.iter_mut().zip(logs.iter_mut()) {
+                    process_ops(*ops, l, ti, &mut rng);
+                }
+                // if this is the last iteration, we increase the times
+                if i == iterations {
+                    debug!("last iteration");
+                    // Increase the time so all logs have the same last time
+                    let max_time = logs
+                        .iter()
+                        .fold(0, |acc, (_, ti)| u128::max(acc, ti.get_time()));
+                    for (_, ti) in logs.iter_mut() {
+                        ti.set_time(max_time);
+                        ti.set_current_time_valid();
+                    }
+                }
+
+                // create an sp
+                for (id, (l, ti)) in logs.iter_mut().enumerate() {
+                    if !sps_created.contains(&(id as Id)) {
+                        create_sps(&mut sps, &mut sps_created, l, ti);
+                    }
+                }
+                // process the sps
+                for ((l, ti), ref mut sps) in logs.iter_mut().zip(sps.iter_mut()) {
+                    process_sps(sps, &mut sps_processed, l, ti, &mut rng);
+                }
+                // increase the timers
+                for (i, (_, ti)) in logs.iter_mut().enumerate() {
+                    if rng.gen() {
+                        debug!("Increasing time at node {}", i);
+                        ti.increase_time_by(1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn create_sps<L: OrderedLog, S: OrderedState>(
+        sps: &mut Vec<Vec<SpToProcess>>,
+        sps_created: &mut HashSet<Id>,
+        l: &mut OrderedLogRun<L, S>,
+        ti: &mut TimeTest,
+    ) {
+        match l.create_local_sp(ti) {
+            Ok((sp, _)) => {
+                debug!("Created Sp at {}", l.id);
+                sps_created.insert(l.id);
+                // let each other node know it needs to process the Sp
+                for (j, sps) in sps.iter_mut().enumerate() {
+                    if l.id == j as Id {
+                        continue;
+                    }
+                    sps.push(sp.clone());
+                }
+            }
+            Err(e) => {
+                debug!("Error creating Sp at {} with err {}", l.id, e);
+            }
+        }
+    }
+
+    fn process_sps<L: OrderedLog, S: OrderedState>(
+        sps: &mut Vec<SpToProcess>,
+        process_count: &mut HashMap<Id, usize>,
+        l: &mut OrderedLogRun<L, S>,
+        ti: &mut TimeTest,
+        rng: &mut StdRng,
+    ) {
+        if sps.is_empty() {
+            return;
+        }
+        // we process the ops in a random order
+        sps.shuffle(rng);
+        // we only process a random amount at a time
+        let end = {
+            if sps.len() > 1 {
+                rng.gen_range(1..sps.len())
+            } else {
+                sps.len()
+            }
+        };
+        let proc: Vec<_> = sps.drain(0..end).collect();
+        for sp in proc {
+            match l.received_sp(sp.clone(), ti) {
+                Ok(_) => {
+                    let c = process_count.get_mut(&l.id).unwrap();
+                    *c += 1;
+                    debug!("Processed sp number {} at node {}", c, l.id);
+                }
+                Err(e) => {
+                    // put in back in the vector to process later
+                    debug!(
+                        "Failed processing Sp at {} with err {}, sp:{:?}",
+                        l.id, e, sp
+                    );
+                    sps.push(sp);
+                }
+            }
+        }
+    }
+
+    pub fn process_ops<L: OrderedLog, S: OrderedState>(
+        ops: &mut Vec<OpResult>,
+        l: &mut OrderedLogRun<L, S>,
+        ti: &mut TimeTest,
+        rng: &mut StdRng,
+    ) {
+        if ops.is_empty() {
+            return;
+        }
+        // we process the ops in a random order
+        ops.shuffle(rng);
+        // we only process a random amount at a time
+        let end = {
+            if ops.len() > 1 {
+                rng.gen_range(1..ops.len())
+            } else {
+                ops.len()
+            }
+        };
+        debug!("Processing {} ops at node {}", end, l.id);
+        let proc = ops.drain(0..end);
+        for op in proc {
+            l.recv_op(op.create, ti).unwrap();
         }
     }
 
@@ -1072,7 +1261,8 @@ mod tests {
 
     use super::{
         test_structs::{
-            check_ordered_logs, run_ordered_once, run_ordered_rand, CollectOrdered, OrderedLogTest,
+            check_ordered_logs, run_ordered_once, run_ordered_rand, run_ordered_standard,
+            CollectOrdered, OrderedLogTest,
         },
         DepBTree, DepHSet, DepVec, Dependents, OrderedLogContainer, OrderedLogRun, OrderedState,
         OrderingError, Result, SupBTree, SupHSet, SupVec, Supporters,
@@ -1218,6 +1408,24 @@ mod tests {
         check_logs(&mut logs);
     }
 
+    #[test]
+    fn collect_standard() {
+        let num_ops = 20;
+        let iterations = 3;
+        for seed in 100..110 {
+            for num_logs in 2..4 {
+                // an op is not committed until it is supported by 3 nodes
+                let commit_count = 3;
+                let mut logs = vec![];
+                for id in 0..num_logs {
+                    logs.push(new_counter(id, 200 + id as usize, commit_count));
+                }
+                run_ordered_standard(&mut logs, num_ops, iterations, seed);
+                check_logs(&mut logs);
+            }
+        }
+    }
+
     type CollectTestLog =
         OrderedLogRun<OrderedLogTest<RWBuf<File>, CollectOrdered<SupVec>>, CounterState>;
 
@@ -1228,7 +1436,7 @@ mod tests {
                 open_log_file(
                     &format!("log_files/ordered_log{}_{}.log", test_idx, id),
                     true,
-                    RWBuf::new,
+                    RWBuf::new, // |_| CursorSR::new(),
                 )
                 .unwrap(),
             ),

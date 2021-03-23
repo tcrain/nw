@@ -5,6 +5,23 @@ use super::op::EntryInfo;
 
 pub type Result<T> = result::Result<T, LogError>;
 
+#[derive(Debug)]
+pub struct DeserializeError(Box<dyn Error>);
+
+impl DeserializeError {
+    pub fn new(e: Box<dyn Error>) -> Self {
+        DeserializeError(e)
+    }
+}
+
+impl Eq for DeserializeError {}
+
+impl PartialEq for DeserializeError {
+    fn eq(&self, other: &Self) -> bool {
+        format!("{:?}", self.0) == format!("{:?}", other.0)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogError {
     EncodeError(EncodeError),
@@ -19,7 +36,7 @@ pub enum LogError {
     FileSeekBeforeStartError,
     SerializeError,
     IsInitSP,
-    DeserializeError,
+    DeserializeError(DeserializeError),
     NoNewOps,
     OpAlreadyDropped,
     OpAlreadyExists,
