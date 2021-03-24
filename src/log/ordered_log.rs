@@ -593,6 +593,9 @@ impl<S: Supporters> PendingOp<S> {
 pub mod test_structs {
     use std::{
         collections::{HashMap, HashSet, VecDeque},
+        error::Error,
+        fmt::Display,
+        fs::File,
         hash::{self, Hash},
         mem::replace,
     };
@@ -606,12 +609,14 @@ pub mod test_structs {
     };
 
     use crate::{
+        log::local_log::new_local_log,
+        log::log_file::open_log_file,
         log::{
             basic_log::test_fns::print_log_from_end,
             basic_log::Log,
             local_log::{OpCreated, OpResult, SpExactToProcess, SpToProcess},
             log_error::LogError,
-            op::{EntryInfo, Op, OpEntryInfo},
+            op::{to_op_data, EntryInfo, Op, OpData, OpEntryInfo},
             sp::{Sp, SpInfo},
         },
         rw_buf::RWS,
@@ -621,7 +626,7 @@ pub mod test_structs {
 
     use super::{
         LogOrdering, OrderedLog, OrderedLogContainer, OrderedLogRun, OrderedSp, OrderedState,
-        OrderingError, PendingOp, Result, SpExactResult, Supporters,
+        OrderingError, PendingOp, Result, SpExactResult, SupVec, Supporters,
     };
 
     enum ChooseOp {
@@ -1240,32 +1245,104 @@ pub mod test_structs {
             Ok(())
         }
     }
+
+    // A simple counter state per id
+    pub struct CounterState {
+        pub counts: HashMap<Id, usize>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum CounterError {
+        InvalidCounter,
+    }
+
+    impl Error for CounterError {}
+
+    impl Display for CounterError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Debug::fmt(&self, f)
+        }
+    }
+
+    impl Default for CounterState {
+        fn default() -> Self {
+            CounterState {
+                counts: HashMap::default(),
+            }
+        }
+    }
+
+    impl OrderedState for CounterState {
+        fn create_local_op(&mut self) -> Result<OpData> {
+            Ok(to_op_data(vec![]))
+        }
+
+        fn check_op(&mut self, op: &OpData) -> Result<()> {
+            if op.len() > 0 {
+                Err(OrderingError::Custom(Box::new(
+                    CounterError::InvalidCounter,
+                )))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn received_op(&mut self, _op: &OpEntryInfo) {
+            // nothing
+        }
+
+        fn after_recv_sp<'a, I: Iterator<Item = &'a OpEntryInfo>>(&mut self, _from: Id, deps: I) {
+            for op in deps {
+                let c = self.counts.entry(op.op.info.id).or_default();
+                *c += 1;
+            }
+        }
+    }
+
+    pub type CollectTestLog<F> =
+        OrderedLogRun<OrderedLogTest<F, CollectOrdered<SupVec>>, CounterState>;
+
+    pub fn new_counter<F: RWS, G: Fn(File) -> F + Copy>(
+        id: Id,
+        test_idx: usize,
+        commit_count: usize,
+        open_fn: G,
+    ) -> (CollectTestLog<F>, TimeTest) {
+        let f = new_local_log(
+            id,
+            Log::new(
+                open_log_file(
+                    &format!("log_files/ordered_log{}_{}.log", test_idx, id),
+                    true,
+                    open_fn,
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let collect = CollectOrdered::new(commit_count);
+        let l = OrderedLogTest::new(OrderedLogContainer::new(f, collect));
+        let counter = CounterState::default();
+        (OrderedLogRun::new(id, l, counter), TimeTest::new())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, error::Error, fmt::Display, fs::File};
 
     use log::debug;
 
     use crate::{
-        log::basic_log::Log,
-        log::local_log::new_local_log,
-        log::{
-            log_file::open_log_file,
-            op::{to_op_data, OpData, OpEntryInfo},
-        },
-        rw_buf::RWBuf,
-        verification::{Id, TimeTest},
+        rw_buf::{RWBuf, RWS},
+        verification::TimeTest,
     };
 
     use super::{
         test_structs::{
-            check_ordered_logs, run_ordered_once, run_ordered_rand, run_ordered_standard,
-            CollectOrdered, OrderedLogTest,
+            check_ordered_logs, new_counter, run_ordered_once, run_ordered_rand,
+            run_ordered_standard, CollectTestLog,
         },
-        DepBTree, DepHSet, DepVec, Dependents, OrderedLogContainer, OrderedLogRun, OrderedState,
-        OrderingError, Result, SupBTree, SupHSet, SupVec, Supporters,
+        DepBTree, DepHSet, DepVec, Dependents, SupBTree, SupHSet, SupVec, Supporters,
     };
 
     fn supporters<S: Supporters>(mut s: S) {
@@ -1324,59 +1401,6 @@ mod tests {
         dependents(DepHSet::default());
     }
 
-    // A simple counter state per id
-    struct CounterState {
-        counts: HashMap<Id, usize>,
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub enum CounterError {
-        InvalidCounter,
-    }
-
-    impl Error for CounterError {}
-
-    impl Display for CounterError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            std::fmt::Debug::fmt(&self, f)
-        }
-    }
-
-    impl Default for CounterState {
-        fn default() -> Self {
-            CounterState {
-                counts: HashMap::default(),
-            }
-        }
-    }
-
-    impl OrderedState for CounterState {
-        fn create_local_op(&mut self) -> Result<OpData> {
-            Ok(to_op_data(vec![]))
-        }
-
-        fn check_op(&mut self, op: &OpData) -> Result<()> {
-            if op.len() > 0 {
-                Err(OrderingError::Custom(Box::new(
-                    CounterError::InvalidCounter,
-                )))
-            } else {
-                Ok(())
-            }
-        }
-
-        fn received_op(&mut self, _op: &OpEntryInfo) {
-            // nothing
-        }
-
-        fn after_recv_sp<'a, I: Iterator<Item = &'a OpEntryInfo>>(&mut self, _from: Id, deps: I) {
-            for op in deps {
-                let c = self.counts.entry(op.op.info.id).or_default();
-                *c += 1;
-            }
-        }
-    }
-
     #[test]
     fn collect_rand() {
         let num_ops = 20;
@@ -1385,7 +1409,7 @@ mod tests {
                 for commit_count in 1..=num_logs as usize {
                     let mut logs = vec![];
                     for id in 0..num_logs {
-                        logs.push(new_counter(id, id as usize, commit_count));
+                        logs.push(new_counter(id, id as usize, commit_count, RWBuf::new));
                     }
                     run_ordered_rand(&mut logs, num_ops, seed);
                     // check the logs have the same vector clock
@@ -1402,7 +1426,7 @@ mod tests {
         let commit_count = 3;
         let mut logs = vec![];
         for id in 0..num_logs {
-            logs.push(new_counter(id, 100 + id as usize, commit_count));
+            logs.push(new_counter(id, 100 + id as usize, commit_count, RWBuf::new));
         }
         run_ordered_once(&mut logs);
         check_logs(&mut logs);
@@ -1418,7 +1442,7 @@ mod tests {
                 let commit_count = 3;
                 let mut logs = vec![];
                 for id in 0..num_logs {
-                    logs.push(new_counter(id, 200 + id as usize, commit_count));
+                    logs.push(new_counter(id, 200 + id as usize, commit_count, RWBuf::new));
                 }
                 run_ordered_standard(&mut logs, num_ops, iterations, seed);
                 check_logs(&mut logs);
@@ -1426,29 +1450,7 @@ mod tests {
         }
     }
 
-    type CollectTestLog =
-        OrderedLogRun<OrderedLogTest<RWBuf<File>, CollectOrdered<SupVec>>, CounterState>;
-
-    fn new_counter(id: Id, test_idx: usize, commit_count: usize) -> (CollectTestLog, TimeTest) {
-        let f = new_local_log(
-            id,
-            Log::new(
-                open_log_file(
-                    &format!("log_files/ordered_log{}_{}.log", test_idx, id),
-                    true,
-                    RWBuf::new, // |_| CursorSR::new(),
-                )
-                .unwrap(),
-            ),
-        )
-        .unwrap();
-        let collect = CollectOrdered::new(commit_count);
-        let l = OrderedLogTest::new(OrderedLogContainer::new(f, collect));
-        let counter = CounterState::default();
-        (OrderedLogRun::new(id, l, counter), TimeTest::new())
-    }
-
-    fn check_logs(logs: &mut [(CollectTestLog, TimeTest)]) {
+    fn check_logs<F: RWS>(logs: &mut [(CollectTestLog<F>, TimeTest)]) {
         let test_logs: Vec<_> = logs.iter().map(|(l, _)| l.get_l()).collect();
         check_ordered_logs(&test_logs);
 

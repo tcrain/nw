@@ -991,7 +991,7 @@ impl From<&OuterOp> for EntryInfo {
 
 impl Display for OuterOp {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "Op(log_index: {}, op: {})", self.log_index, self.op.op)
+        write!(f, "{:?}", self)
     }
 }
 

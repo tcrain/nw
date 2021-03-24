@@ -400,10 +400,6 @@ impl<F: RWS> LocalLog<F> {
                 .as_sp()
                 .get_ops_after_iter(after_ops, self.l.get_first_op(), self.l.get_log_state())?
                 .filter_map(|op| {
-                    debug!(
-                        "add op to local sp: id {}, time {} , op: {:?}",
-                        op.op.op.info.id, t, op
-                    );
                     if op.op.op.info.time <= t {
                         if op.arrived_late {
                             late_included.push((&op.op).into());

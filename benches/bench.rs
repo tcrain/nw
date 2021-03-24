@@ -2,13 +2,21 @@ use std::fs::File;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use nw::{
+    causal::causal_log::test_structs::{new_causal, CausalTestLog},
     file_sr::{CursorSR, FileSR},
     log::ordered_log::{
         DepBTree, DepHSet, DepVec, Dependents, SupBTree, SupHSet, SupVec, Supporters,
     },
-    log::{local_log::test_setup::LogTest, LogIdx},
+    log::{
+        local_log::test_setup::LogTest,
+        ordered_log::{
+            test_structs::{new_counter, run_ordered_rand, run_ordered_standard, CollectTestLog},
+            OrderedLog, OrderedLogRun, OrderedState,
+        },
+        LogIdx,
+    },
     rw_buf::RWBuf,
-    verification::Id,
+    verification::{Id, TimeTest},
 };
 use nw::{
     log::local_log::test_setup::{add_ops_rand_order, add_sps, new_log_test},
@@ -41,6 +49,73 @@ fn transfer_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(open_fn: G) -> Vec<LogT
     logs
 }
 
+fn counter_bench_file() -> Vec<(CollectTestLog<FileSR>, TimeTest)> {
+    counter_bench_setup(FileSR::new)
+}
+
+fn counter_bench_mem() -> Vec<(CollectTestLog<CursorSR>, TimeTest)> {
+    counter_bench_setup(|_| CursorSR::new())
+}
+
+fn counter_bench_buf() -> Vec<(CollectTestLog<RWBuf<File>>, TimeTest)> {
+    counter_bench_setup(RWBuf::new)
+}
+
+fn counter_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(
+    open_fn: G,
+) -> Vec<(CollectTestLog<F>, TimeTest)> {
+    let num_logs = 4;
+    let commit_count = 3;
+    let mut logs = vec![];
+    for i in 0..num_logs {
+        logs.push(new_counter(i, 100, commit_count, open_fn))
+    }
+    logs
+}
+
+fn causal_bench_file() -> Vec<(CausalTestLog<FileSR>, TimeTest)> {
+    causal_bench_setup(FileSR::new)
+}
+
+fn causal_bench_mem() -> Vec<(CausalTestLog<CursorSR>, TimeTest)> {
+    causal_bench_setup(|_| CursorSR::new())
+}
+
+fn causal_bench_buf() -> Vec<(CausalTestLog<RWBuf<File>>, TimeTest)> {
+    causal_bench_setup(RWBuf::new)
+}
+
+fn causal_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(
+    open_fn: G,
+) -> Vec<(CausalTestLog<F>, TimeTest)> {
+    let num_logs = 4;
+    let commit_count = 3;
+    let mut logs = vec![];
+    for i in 0..num_logs {
+        logs.push(new_causal(i, 100, commit_count, open_fn))
+    }
+    logs
+}
+
+fn run_ordered_standard_bench<L: OrderedLog, S: OrderedState>(
+    mut logs: Vec<(OrderedLogRun<L, S>, TimeTest)>,
+) -> Vec<(OrderedLogRun<L, S>, TimeTest)> {
+    let num_ops = 10;
+    let iterations = 2;
+    let seed = 100;
+    run_ordered_standard(&mut logs, num_ops, iterations, seed);
+    logs
+}
+
+fn run_ordered_rand_bench<L: OrderedLog, S: OrderedState>(
+    mut logs: Vec<(OrderedLogRun<L, S>, TimeTest)>,
+) -> Vec<(OrderedLogRun<L, S>, TimeTest)> {
+    let num_ops = 20;
+    let seed = 100;
+    run_ordered_rand(&mut logs, num_ops, seed);
+    logs
+}
+
 fn run_bench<F: RWS>(mut logs: Vec<LogTest<F>>) -> Vec<LogTest<F>> {
     // input the logs so their initialization is not timed
     let mut rng = StdRng::seed_from_u64(100);
@@ -62,6 +137,102 @@ fn log_transfer_benchmark(c: &mut Criterion) {
     });
     c.bench_function("transfer_log_mem", move |b| {
         b.iter_batched(transfer_bench_mem, run_bench, BatchSize::SmallInput)
+    });
+}
+
+fn ordered_counter_benchmark(c: &mut Criterion) {
+    c.bench_function("ordered_counter_file", move |b| {
+        b.iter_batched(
+            counter_bench_file,
+            run_ordered_standard_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("ordered_counter_buffered", move |b| {
+        b.iter_batched(
+            counter_bench_buf,
+            run_ordered_standard_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("ordered_counter_mem", move |b| {
+        b.iter_batched(
+            counter_bench_mem,
+            run_ordered_standard_bench,
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+fn rand_counter_benchmark(c: &mut Criterion) {
+    c.bench_function("rand_counter_file", move |b| {
+        b.iter_batched(
+            counter_bench_file,
+            run_ordered_rand_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("rand_counter_buffered", move |b| {
+        b.iter_batched(
+            counter_bench_buf,
+            run_ordered_rand_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("rand_counter_mem", move |b| {
+        b.iter_batched(
+            counter_bench_mem,
+            run_ordered_rand_bench,
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+fn ordered_causal_benchmark(c: &mut Criterion) {
+    c.bench_function("ordered_causal_file", move |b| {
+        b.iter_batched(
+            causal_bench_file,
+            run_ordered_standard_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("ordered_causal_buffered", move |b| {
+        b.iter_batched(
+            causal_bench_buf,
+            run_ordered_standard_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("ordered_causal_mem", move |b| {
+        b.iter_batched(
+            causal_bench_mem,
+            run_ordered_standard_bench,
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+fn rand_causal_benchmark(c: &mut Criterion) {
+    c.bench_function("rand_causal_file", move |b| {
+        b.iter_batched(
+            causal_bench_file,
+            run_ordered_rand_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("rand_causal_buffered", move |b| {
+        b.iter_batched(
+            causal_bench_buf,
+            run_ordered_rand_bench,
+            BatchSize::SmallInput,
+        )
+    });
+    c.bench_function("rand_causal_mem", move |b| {
+        b.iter_batched(
+            causal_bench_mem,
+            run_ordered_rand_bench,
+            BatchSize::SmallInput,
+        )
     });
 }
 
@@ -176,6 +347,10 @@ criterion_group!(
     benches,
     log_transfer_benchmark,
     dependents_benchmark,
-    supporters_benchmark
+    supporters_benchmark,
+    ordered_counter_benchmark,
+    rand_counter_benchmark,
+    ordered_causal_benchmark,
+    rand_causal_benchmark
 );
 criterion_main!(benches);

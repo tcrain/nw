@@ -5,8 +5,8 @@ use std::rc::Weak;
 
 use rustc_hash::FxHashMap;
 
-pub const DEFAULT_DISK_ENTRIES: usize = 32; // the number of items loaded from the disk stored in memory
-pub const DEFAULT_MAX_ENTRIES: usize = 32; // the number of recent entries stored in memory
+pub const DEFAULT_DISK_ENTRIES: usize = 64; // the number of items loaded from the disk stored in memory
+pub const DEFAULT_MAX_ENTRIES: usize = 64; // the number of recent entries stored in memory
 
 #[inline(always)]
 fn is_pow2(x: usize) -> bool {
