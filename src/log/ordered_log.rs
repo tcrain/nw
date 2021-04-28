@@ -1,40 +1,52 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
+    convert::TryInto,
     error::Error,
     fmt::{Debug, Display},
+    hash::{BuildHasherDefault, Hasher},
     iter::repeat,
     result,
 };
 
 use bincode::DefaultOptions;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::{
+    config::Time,
     rw_buf::RWS,
-    verification::{Id, TimeInfo},
+    verification::{Hash, Id, TimeInfo},
 };
 
 use super::{
     basic_log::Log,
-    local_log::{LocalLog, OpCreated, OpResult, SpDetails, SpExactToProcess, SpToProcess},
-    log_error::LogError,
+    local_log::{
+        LocalLog, OpCreated, OpResult, SpDetails, SpExactToProcess, SpStateExactToProcess,
+        SpStateToProcess, SpToProcess,
+    },
+    log_error::{DeserializeError, LogError},
     op::{Op, OpData, OpEntryInfo},
-    sp::{Sp, SpInfo},
+    sp::{check_sp_time, Sp, SpInfo, SpState},
     LogIdx,
 };
 
 #[derive(Debug)]
 pub enum OrderingError {
-    Custom(Box<dyn Error>), // An error related to the ordering.
-    LogError(LogError),     // An error from the underlying Log.
+    Custom(Box<dyn Error>),     // An error related to the ordering.
+    LogError(LogError),         // An error from the underlying Log.
+    NoPendingSPs(Option<Time>), // When there are no pending SPs to process. Time is the minimum time to process andy pending Sps.
+    SPAlreadyPending,           // There is already a copy of the Sp pending processing.
 }
 
 impl OrderingError {
     pub fn unwrap_log_error(&self) -> &LogError {
         match self {
             OrderingError::LogError(l) => l,
-            OrderingError::Custom(_) => panic!("expected log error"),
+            _ => panic!("expected log error"),
         }
+    }
+
+    pub fn wrap_deser_error(e: Box<dyn Error>) -> Self {
+        OrderingError::LogError(LogError::DeserializeError(DeserializeError::new(e)))
     }
 }
 
@@ -68,53 +80,125 @@ pub trait LogOrdering {
 /// OrderedSate is used to implement a state machine, that creates and receives
 /// operations from a LogOrdering.
 pub trait OrderedState {
-    /// Creates a operation at the local node.
-    fn create_local_op(&mut self) -> Result<OpData>;
     /// Called before an operation is processesed at a local node.
     fn check_op(&mut self, op: &OpData) -> Result<()>;
     /// Called after an operation is received successfully at a local node
     fn received_op(&mut self, op: &OpEntryInfo);
-    /// Called after an sp is received from Id that supports the ops in deps.
+    /// Called after an sp is received from Id.
+    /// I contains the operations returned by the LogOrdering implementation after receiving the Sp.
     fn after_recv_sp<'a, I: Iterator<Item = &'a OpEntryInfo>>(&mut self, from: Id, deps: I);
 }
+
+/// This is used in a heap where the node with the smallest time is at the end of the heap.
+enum TimeOrderedSP {
+    Normal(SpStateToProcess),
+    Exact(SpStateExactToProcess),
+}
+
+impl TimeOrderedSP {
+    fn get_time(&self) -> Time {
+        match self {
+            TimeOrderedSP::Normal(sp) => sp.sp.sp.info.time,
+            TimeOrderedSP::Exact(sp) => sp.sp.sp.info.time,
+        }
+    }
+}
+
+impl PartialEq for TimeOrderedSP {
+    fn eq(&self, other: &Self) -> bool {
+        self.get_time() == other.get_time()
+    }
+}
+
+impl Eq for TimeOrderedSP {}
+
+impl PartialOrd for TimeOrderedSP {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TimeOrderedSP {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.get_time().cmp(&other.get_time()).reverse()
+    }
+}
+
+/// Map and set collections for when the key is already hashed.
+type HashedKeyMap<K, V> = HashMap<K, V, BuildHasherDefault<AlreadyHashedHasher>>;
+type HashedKeySet<K> = HashSet<K, BuildHasherDefault<AlreadyHashedHasher>>;
 
 /// Implements the given OrderingLog and OrderedState by calling their operation.
 pub struct OrderedLogRun<L: OrderedLog, S: OrderedState> {
     id: Id,
     l: L,
     state: S,
+    to_process_time: BinaryHeap<TimeOrderedSP>, // SPs that are not yet ready to process because of their time
+    // Sps that are pending their previous hash
+    // We only keep one per hash, since we assume a non-faulty node will create Sps in order
+    // If there are more than one, those will have to be recovered from other nodes if they are processed
+    // by another node
+    to_process_prev: HashedKeyMap<Hash, TimeOrderedSP>,
+    ready_to_process: Vec<TimeOrderedSP>, // Sps that are ready to process
+    // this is the hash of all the Sps in to_process_time, to_process_prev, ready_to_process
+    // it is used so we don't place duplicates in the lists
+    all_pending_sps: HashedKeySet<Hash>,
 }
 
 impl<L: OrderedLog, S: OrderedState> OrderedLogRun<L, S> {
     pub fn new(id: Id, l: L, state: S) -> Self {
-        OrderedLogRun { id, l, state }
+        OrderedLogRun {
+            id,
+            l,
+            state,
+            to_process_time: BinaryHeap::new(),
+            to_process_prev: HashedKeyMap::default(),
+            ready_to_process: Vec::default(),
+            all_pending_sps: HashedKeySet::default(),
+        }
     }
 
+    #[inline(always)]
+    pub fn has_pending_sp(&self) -> bool {
+        !self.all_pending_sps.is_empty()
+    }
+
+    #[inline(always)]
     pub fn get_l(&self) -> &L {
         &self.l
     }
 
+    #[inline(always)]
     pub fn get_l_mut(&mut self) -> &mut L {
         &mut self.l
     }
 
+    #[inline(always)]
     pub fn get_s(&self) -> &S {
         &self.state
     }
-}
 
-impl<L: OrderedLog, S: OrderedState> OrderedLogRun<L, S> {
+    #[inline(always)]
+    pub fn get_s_mut(&mut self) -> &mut S {
+        &mut self.state
+    }
+
     #[inline(always)]
     pub fn serialize_option(&self) -> DefaultOptions {
         self.l.serialize_option()
     }
 
-    pub fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()> {
+    pub fn check_sp_exact<T: TimeInfo>(
+        &mut self,
+        ti: &T,
+        sp_p: &SpStateExactToProcess,
+    ) -> Result<()> {
+        // let sp_p = SpStateExactToProcess::from_sp(sp_p, self.serialize_option())?;
         self.l.check_sp_exact(ti, sp_p)
     }
 
-    pub fn new_op<T: TimeInfo>(&mut self, ti: &mut T) -> Result<OpResult> {
-        let data = self.state.create_local_op()?;
+    pub fn new_local_op<T: TimeInfo>(&mut self, data: OpData, ti: &mut T) -> Result<OpResult> {
+        // let data = self.state.create_local_op()?;
         let op = Op::new(self.id, data, ti);
         self.l.create_local_op(op, ti)
     }
@@ -138,28 +222,101 @@ impl<L: OrderedLog, S: OrderedState> OrderedLogRun<L, S> {
         self.l.get_sp_exact(sp)
     }
 
+    /// Checks if a received Sp is already pending to be decided.
+    fn check_sp_pending(&self, sp: &SpState) -> Result<()> {
+        if !self.all_pending_sps.is_empty() && self.all_pending_sps.contains(&sp.hash) {
+            return Err(OrderingError::SPAlreadyPending);
+        }
+        Ok(())
+    }
+
     pub fn received_sp<T: TimeInfo>(
         &mut self,
         sp_p: SpToProcess,
         ti: &mut T,
     ) -> Result<(SpToProcess, SpDetails)> {
-        let spr = self.l.received_sp(ti, sp_p)?;
+        let sp_p = SpStateToProcess::from_sp(sp_p, self.l.serialize_option())
+            .map_err(OrderingError::LogError)?;
+        self.received_sp_state(sp_p, ti)
+    }
+
+    fn add_pending_time(&mut self, hash: Hash, sp: TimeOrderedSP) {
+        if !self.all_pending_sps.insert(hash) {
+            panic!("expected hash not to be pending")
+        }
+        self.to_process_time.push(sp);
+    }
+
+    fn add_pending_prev(&mut self, hash: Hash, prev_hash: Hash, sp: TimeOrderedSP) {
+        if !self.all_pending_sps.insert(hash) {
+            panic!("expected hash not to be pending")
+        }
+        self.to_process_prev.insert(prev_hash, sp);
+    }
+
+    fn received_sp_state<T: TimeInfo>(
+        &mut self,
+        sp_p: SpStateToProcess,
+        ti: &mut T,
+    ) -> Result<(SpToProcess, SpDetails)> {
+        self.check_sp_pending(&sp_p.sp)?;
+        let spr = match self.l.received_sp(ti, &sp_p) {
+            Ok(spr) => spr,
+            Err(e) if matches!(e, OrderingError::LogError(LogError::SpArrivedEarly)) => {
+                // we must try again later to process the Sp once its time has passed
+                self.add_pending_time(sp_p.sp.hash, TimeOrderedSP::Normal(sp_p));
+                return Err(e);
+            }
+            Err(e) if matches!(e, OrderingError::LogError(LogError::PrevSpNotFound)) => {
+                // we do not have the previous Sp, so we save for later
+                let prev_hash = sp_p.sp.sp.support_hash;
+                self.add_pending_prev(sp_p.sp.hash, prev_hash, TimeOrderedSP::Normal(sp_p));
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         self.state.after_recv_sp(
             spr.sp_d.info.id,
             spr.completed_ops.iter().map(|op| &op.data),
         );
+        self.after_process_sp(&spr.sp_p.sp);
         Ok((spr.sp_p, spr.sp_d))
     }
 
-    pub fn received_sp_exact<T: TimeInfo>(
+    fn received_sp_exact<T: TimeInfo>(
         &mut self,
         sp_e: SpExactToProcess,
         ti: &mut T,
     ) -> Result<(SpToProcess, SpDetails)> {
+        let sp_e = SpStateExactToProcess::from_sp(sp_e, self.l.serialize_option())
+            .map_err(OrderingError::LogError)?;
+        self.received_sp_state_exact(sp_e, ti)
+    }
+
+    fn received_sp_state_exact<T: TimeInfo>(
+        &mut self,
+        sp_e: SpStateExactToProcess,
+        ti: &mut T,
+    ) -> Result<(SpToProcess, SpDetails)> {
+        self.check_sp_pending(&sp_e.sp)?;
         for op in sp_e.exact.iter() {
             self.state.check_op(&op.data)?;
         }
-        let spr = self.l.received_sp_exact(ti, sp_e)?;
+        let spr = match self.l.received_sp_exact(ti, &sp_e) {
+            Ok(spr) => spr,
+            Err(e) if matches!(e, OrderingError::LogError(LogError::SpArrivedEarly)) => {
+                // we must try again later to process the Sp once its time has passed
+                self.add_pending_time(sp_e.sp.hash, TimeOrderedSP::Exact(sp_e));
+                return Err(e);
+            }
+            Err(e) if matches!(e, OrderingError::LogError(LogError::PrevSpNotFound)) => {
+                // we do not have the previous Sp
+                let prev_hash = sp_e.sp.sp.support_hash;
+                self.add_pending_prev(sp_e.sp.hash, prev_hash, TimeOrderedSP::Exact(sp_e));
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        };
         for op in spr.new_ops {
             self.state.received_op(&op);
         }
@@ -167,7 +324,77 @@ impl<L: OrderedLog, S: OrderedState> OrderedLogRun<L, S> {
             spr.o_sp.sp_d.info.id,
             spr.o_sp.completed_ops.iter().map(|op| &op.data),
         );
+        self.after_process_sp(&spr.o_sp.sp_p.sp);
         Ok((spr.o_sp.sp_p, spr.o_sp.sp_d))
+    }
+
+    /// Check if there was an Sp pending based on the sp that just completed, and add it to the ready to process Sp list.
+    fn after_process_sp(&mut self, sp: &Sp) {
+        if let Some(o_sp) = self.to_process_prev.remove(&sp.support_hash) {
+            self.ready_to_process.push(o_sp);
+        }
+    }
+
+    /// Processes any pedning Sp (from prev pending or time pending) if there are any.
+    pub fn process_any_pending<T: TimeInfo>(
+        &mut self,
+        ti: &mut T,
+    ) -> Result<(SpToProcess, SpDetails)> {
+        match self.process_pending_ready_sp(ti) {
+            Err(OrderingError::NoPendingSPs(_)) => (), // we try the time pending
+            v => return v,
+        }
+        self.process_pending_time_sp(ti)
+    }
+
+    /// This will process a ready to process PendingSP (if one exists).
+    pub fn process_pending_ready_sp<T: TimeInfo>(
+        &mut self,
+        ti: &mut T,
+    ) -> Result<(SpToProcess, SpDetails)> {
+        if let Some(sp) = self.ready_to_process.pop() {
+            self.perform_pending_process(sp, ti)
+        } else {
+            Err(OrderingError::NoPendingSPs(None))
+        }
+    }
+
+    /// This will process the pending Sp with minimum time (if one exists)
+    pub fn process_pending_time_sp<T: TimeInfo>(
+        &mut self,
+        ti: &mut T,
+    ) -> Result<(SpToProcess, SpDetails)> {
+        let p_sp = self
+            .to_process_time
+            .peek()
+            .ok_or(OrderingError::NoPendingSPs(None))?;
+        let t = p_sp.get_time();
+        if check_sp_time(t, ti).is_err() {
+            return Err(OrderingError::NoPendingSPs(Some(t)));
+        }
+        let sp = self.to_process_time.pop().unwrap();
+        self.perform_pending_process(sp, ti)
+    }
+
+    fn perform_pending_process<T: TimeInfo>(
+        &mut self,
+        sp: TimeOrderedSP,
+        ti: &mut T,
+    ) -> Result<(SpToProcess, SpDetails)> {
+        match sp {
+            TimeOrderedSP::Normal(sp_p) => {
+                if !self.all_pending_sps.remove(&sp_p.sp.hash) {
+                    panic!("all pending should be in list");
+                }
+                self.received_sp_state(sp_p, ti)
+            }
+            TimeOrderedSP::Exact(sp_e) => {
+                if !self.all_pending_sps.remove(&sp_e.sp.hash) {
+                    panic!("all pending should be in list");
+                }
+                self.received_sp_state_exact(sp_e, ti)
+            }
+        }
     }
 }
 
@@ -207,9 +434,9 @@ pub trait OrderedLog {
     fn received_sp<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp_p: SpToProcess,
+        sp_p: &SpStateToProcess,
     ) -> Result<OrderedSp<<Self::Ordering as LogOrdering>::Supporter>>;
-    fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()>;
+    fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpStateExactToProcess) -> Result<()>;
     /// Called when a new Sp is received with the exact set of Ops it contains.
     /// Returns a tuple containing the vector of new operations contained in the Sp
     /// (i.e. the Ops for which received_op was not called previouly) and the
@@ -217,7 +444,7 @@ pub trait OrderedLog {
     fn received_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp_p: SpExactToProcess,
+        sp_p: &SpStateExactToProcess,
     ) -> Result<SpExactResult<<Self::Ordering as LogOrdering>::Supporter>>;
 }
 
@@ -292,7 +519,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
     fn received_sp<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp_p: SpToProcess,
+        sp_p: &SpStateToProcess,
     ) -> Result<OrderedSp<O::Supporter>> {
         let (sp_p, sp_d) = self
             .l
@@ -306,7 +533,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
         })
     }
 
-    fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()> {
+    fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpStateExactToProcess) -> Result<()> {
         let mut ops = vec![];
         for op in sp_p.exact.iter() {
             ops.push(
@@ -316,7 +543,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
         }
         self.l
             .l
-            .check_sp_exact(sp_p.sp.clone(), &ops, ti)
+            .check_sp_exact(&sp_p.sp, &ops, ti)
             .map_err(OrderingError::LogError)?;
         Ok(())
     }
@@ -324,7 +551,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
     fn received_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp_p: SpExactToProcess,
+        sp_p: &SpStateExactToProcess,
     ) -> Result<SpExactResult<O::Supporter>> {
         let (new_ops, sp_p, sp_d) = self
             .l
@@ -345,8 +572,25 @@ impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
     }
 }
 
-pub type HMap<K, V> = FxHashMap<K, V>;
-pub type HSet<K> = FxHashSet<K>;
+/// This is used as the haser for the Map or Set collection when the key is already hashed.
+struct AlreadyHashedHasher(u64);
+
+impl Default for AlreadyHashedHasher {
+    fn default() -> Self {
+        AlreadyHashedHasher(0)
+    }
+}
+
+impl Hasher for AlreadyHashedHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // we just take the first bytes as u64
+        self.0 = u64::from_be_bytes(bytes[..8].try_into().unwrap());
+    }
+}
 
 /// Dependents is used to track the log indicies of the operations that an Sp supports.
 /// Each Op that is not ready that the Sp supports is added to the Dependents set of the Sp.
@@ -406,6 +650,8 @@ impl Dependents for DepVec {
         self.v.len()
     }
 }
+
+pub type HSet<K> = FxHashSet<K>;
 
 /// Implements the Dependents trait using a HashSet.
 #[derive(Debug)]
@@ -614,7 +860,10 @@ pub mod test_structs {
         log::{
             basic_log::test_fns::print_log_from_end,
             basic_log::Log,
-            local_log::{OpCreated, OpResult, SpExactToProcess, SpToProcess},
+            local_log::{
+                OpCreated, OpResult, SpExactToProcess, SpStateExactToProcess, SpStateToProcess,
+                SpToProcess,
+            },
             log_error::LogError,
             op::{to_op_data, EntryInfo, Op, OpData, OpEntryInfo},
             sp::{Sp, SpInfo},
@@ -628,6 +877,12 @@ pub mod test_structs {
         LogOrdering, OrderedLog, OrderedLogContainer, OrderedLogRun, OrderedSp, OrderedState,
         OrderingError, PendingOp, Result, SpExactResult, SupVec, Supporters,
     };
+
+    /// Creates operations at the local node for the tests.
+    pub trait OrderedStateTest {
+        /// Creates a operation at the local node.
+        fn create_local_op(&mut self) -> Result<OpData>;
+    }
 
     enum ChooseOp {
         ProcessEntry,
@@ -643,7 +898,7 @@ pub mod test_structs {
         }
     }
 
-    pub fn run_ordered_rand<L: OrderedLog, S: OrderedState>(
+    pub fn run_ordered_rand<L: OrderedLog, S: OrderedState + OrderedStateTest>(
         logs: &mut [(OrderedLogRun<L, S>, TimeTest)],
         num_ops: usize,
         seed: u64,
@@ -666,7 +921,8 @@ pub mod test_structs {
                         utils::gen_shuffled(num_logs as usize, Some(idx), &mut rng).into();
                     debug!("idx {}, others {:?}", idx, others);
                     let (l, ti) = &mut logs[idx];
-                    l.new_op(ti).unwrap();
+                    let op_data = l.get_s_mut().create_local_op().unwrap();
+                    l.new_local_op(op_data, ti).unwrap();
                     ti.set_current_time_valid();
                     let (sp, _) = l.create_local_sp(ti).unwrap();
                     let sp_e = l.get_sp_exact(sp.sp).unwrap();
@@ -686,7 +942,9 @@ pub mod test_structs {
                     debug!("process log {}", idx);
                     let (l, ti) = &mut logs[idx];
                     ti.set_sp_time_valid(sp.sp.info.time);
-                    if let Err(err) = l.check_sp_exact(ti, sp) {
+                    let sp_s =
+                        SpStateExactToProcess::from_sp(sp.clone(), l.serialize_option()).unwrap();
+                    if let Err(err) = l.check_sp_exact(ti, &sp_s) {
                         if let OrderingError::LogError(err) = &err {
                             match err {
                                 LogError::PrevSpNotFound => {
@@ -735,7 +993,7 @@ pub mod test_structs {
     }
 
     /// Run a test exampe of ordered logs, where they all proceede at similar speeds.
-    pub fn run_ordered_standard<L: OrderedLog, S: OrderedState>(
+    pub fn run_ordered_standard<L: OrderedLog, S: OrderedState + OrderedStateTest>(
         logs: &mut [(OrderedLogRun<L, S>, TimeTest)],
         num_ops: usize,
         iterations: usize,
@@ -762,7 +1020,8 @@ pub mod test_structs {
                     let (l, ti) = &mut logs[id];
                     debug!("Creating {} ops at node {}", count, id);
                     for _ in 0..count {
-                        let new_op = l.new_op(ti).unwrap();
+                        let op_data = l.get_s_mut().create_local_op().unwrap();
+                        let new_op = l.new_local_op(op_data, ti).unwrap();
                         for (j, ops) in ops.iter_mut().enumerate() {
                             if j == id {
                                 continue;
@@ -891,6 +1150,12 @@ pub mod test_structs {
                         "Failed processing Sp at {} with err {}, sp:{:?}",
                         l.id, e, sp
                     );
+                    // check to process any pending operation
+                    if l.process_any_pending(ti).is_ok() {
+                        let c = process_count.get_mut(&l.id).unwrap();
+                        *c += 1;
+                        debug!("Processed sp number {} at node {}", c, l.id);
+                    }
                     sps.push(sp);
                 }
             }
@@ -923,7 +1188,7 @@ pub mod test_structs {
         }
     }
 
-    pub fn run_ordered_once<L: OrderedLog, S: OrderedState>(
+    pub fn run_ordered_once<L: OrderedLog, S: OrderedState + OrderedStateTest>(
         logs: &mut [(OrderedLogRun<L, S>, TimeTest)],
     ) {
         let num_logs = logs.len();
@@ -933,7 +1198,8 @@ pub mod test_structs {
         // print_logs(&mut logs);
         for i in 0..num_logs as usize {
             let (l, ti) = &mut logs[i];
-            ops.push(l.new_op(ti).unwrap());
+            let op_data = l.get_s_mut().create_local_op().unwrap();
+            ops.push(l.new_local_op(op_data, ti).unwrap());
             assert_eq!(
                 &LogError::OpAlreadyExists,
                 l.recv_op(ops[i].create.clone(), ti)
@@ -1160,21 +1426,25 @@ pub mod test_structs {
         fn received_sp<T: TimeInfo>(
             &mut self,
             ti: &mut T,
-            sp_p: SpToProcess,
+            sp_p: &SpStateToProcess,
         ) -> Result<OrderedSp<O::Supporter>> {
             let o_sp = self.l.received_sp(ti, sp_p)?;
             self.after_recv_sp(&o_sp);
             Ok(o_sp)
         }
 
-        fn check_sp_exact<T: TimeInfo>(&mut self, ti: &T, sp_p: &SpExactToProcess) -> Result<()> {
+        fn check_sp_exact<T: TimeInfo>(
+            &mut self,
+            ti: &T,
+            sp_p: &SpStateExactToProcess,
+        ) -> Result<()> {
             self.l.check_sp_exact(ti, sp_p)
         }
 
         fn received_sp_exact<T: TimeInfo>(
             &mut self,
             ti: &mut T,
-            sp_p: SpExactToProcess,
+            sp_p: &SpStateExactToProcess,
         ) -> Result<SpExactResult<O::Supporter>> {
             let spr = self.l.received_sp_exact(ti, sp_p)?;
             for op in spr.new_ops.iter() {
@@ -1272,11 +1542,13 @@ pub mod test_structs {
         }
     }
 
-    impl OrderedState for CounterState {
+    impl OrderedStateTest for CounterState {
         fn create_local_op(&mut self) -> Result<OpData> {
             Ok(to_op_data(vec![]))
         }
+    }
 
+    impl OrderedState for CounterState {
         fn check_op(&mut self, op: &OpData) -> Result<()> {
             if op.len() > 0 {
                 Err(OrderingError::Custom(Box::new(

@@ -41,16 +41,55 @@ pub struct SpDetails {
 }
 
 #[derive(Debug, Clone)]
-pub struct SpToProcess {
-    pub sp: Sp,
+pub struct SpOps {
     pub not_included: Vec<EntryInfo>, // all operations with time less that the SP time that were not included
     pub late_included: Vec<EntryInfo>, // late operations that were included
 }
 
+/// This is created to be sent to other nodes to process an Sp normally.
+#[derive(Debug, Clone)]
+pub struct SpToProcess {
+    pub sp: Sp,
+    pub ops: SpOps,
+}
+
+/// This is calculated from SpToProcess at the local node to process the received Sp.
+#[derive(Debug, Clone)]
+pub struct SpStateToProcess {
+    pub sp: SpState,
+    pub ops: SpOps,
+}
+
+impl SpStateToProcess {
+    pub fn from_sp<O: Options>(sp: SpToProcess, o: O) -> Result<Self> {
+        Ok(Self {
+            sp: SpState::from_sp(sp.sp, o)?,
+            ops: sp.ops,
+        })
+    }
+}
+
+/// This is created to be sent to other nodes to process an Sp by the exact set of operations it contains.
 #[derive(Debug, Clone)]
 pub struct SpExactToProcess {
     pub sp: Sp,
     pub exact: Vec<Op>,
+}
+
+/// This is calculated from SpExactToProcess at the local node to process the received Sp.
+#[derive(Debug, Clone)]
+pub struct SpStateExactToProcess {
+    pub sp: SpState,
+    pub exact: Vec<Op>,
+}
+
+impl SpStateExactToProcess {
+    pub fn from_sp<O: Options>(sp: SpExactToProcess, o: O) -> Result<Self> {
+        Ok(Self {
+            sp: SpState::from_sp(sp.sp, o)?,
+            exact: sp.exact,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -204,18 +243,23 @@ impl<F: RWS> LocalLog<F> {
     pub fn received_sp<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp_p: SpToProcess,
+        sp_p: &SpStateToProcess,
     ) -> Result<(SpToProcess, SpDetails)> {
         //  let sp = sp_p.sp.to_sp(self.l.serialize_option())?;
-        self.process_sp(ti, sp_p.sp, &sp_p.late_included, &sp_p.not_included)
+        self.process_sp(
+            ti,
+            &sp_p.sp,
+            &sp_p.ops.late_included,
+            &sp_p.ops.not_included,
+        )
     }
 
     pub fn received_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp_p: SpExactToProcess,
+        sp_p: &SpStateExactToProcess,
     ) -> Result<(Vec<OpEntryInfo>, SpToProcess, SpDetails)> {
-        let sp = sp_p.sp; //.to_sp(self.l.serialize_option())?;
+        // let sp = &sp_p.sp; //.to_sp(self.l.serialize_option())?;
         let mut new_ops = vec![];
         let mut all_ops = vec![];
         for op in sp_p.exact.iter() {
@@ -235,7 +279,7 @@ impl<F: RWS> LocalLog<F> {
                 }
             }
         }
-        let (sp_p, sp_d) = self.process_sp_exact(ti, sp, &all_ops)?;
+        let (sp_p, sp_d) = self.process_sp_exact(ti, &sp_p.sp, &all_ops)?;
         Ok((new_ops, sp_p, sp_d))
     }
 
@@ -267,8 +311,10 @@ impl<F: RWS> LocalLog<F> {
             .map(|op| op.get_ptr(state).borrow().entry.get_entry_info())
             .collect();
         SpToProcess {
-            not_included,
-            late_included,
+            ops: SpOps {
+                not_included,
+                late_included,
+            },
             sp: sp_ptr.entry.as_sp().sp.sp.clone(),
         }
     }
@@ -276,10 +322,10 @@ impl<F: RWS> LocalLog<F> {
     fn process_sp_exact<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp: Sp,
+        sp: &SpState,
         exact: &[EntryInfo],
     ) -> Result<(SpToProcess, SpDetails)> {
-        let id = sp.info.id;
+        let id = sp.sp.info.id;
         debug!("\nprocess exact sp: {:?}, ops: {:?}\n", sp, exact);
         let (outer_sp, ops) = self.l.check_sp_exact(sp, exact, ti)?;
         let sp = self.l.insert_outer_sp(outer_sp)?;
@@ -304,11 +350,11 @@ impl<F: RWS> LocalLog<F> {
     fn process_sp<T: TimeInfo>(
         &mut self,
         ti: &mut T,
-        sp: Sp,
+        sp: &SpState,
         late_included: &[EntryInfo],
         not_included: &[EntryInfo],
     ) -> Result<(SpToProcess, SpDetails)> {
-        let id = sp.info.id;
+        let id = sp.sp.info.id;
         let (outer_sp, ops) = self.l.check_sp(sp, &late_included, &not_included, ti)?;
         let sp = self.l.insert_outer_sp(outer_sp)?;
         if id == self.id {
@@ -408,9 +454,13 @@ impl<F: RWS> LocalLog<F> {
                     }
                     None
                 });
-            Sp::new(self.id, t, op_iter, vec![], sp_entry_info)
+            SpState::from_sp(
+                Sp::new(self.id, t, op_iter, vec![], sp_entry_info),
+                self.serialize_option(),
+            )
+            .expect("should be able to serialize own sp")
         };
-        self.process_sp(ti, sp, &late_included, &[])
+        self.process_sp(ti, &sp, &late_included, &[])
     }
 }
 
@@ -420,7 +470,9 @@ pub mod test_setup {
 
     use rand::prelude::{SliceRandom, StdRng};
 
+    #[cfg(debug_assertions)]
     use crate::log::basic_log::test_fns::check_sp_prev;
+
     use crate::{
         log::{
             basic_log::Log, log_file::open_log_file, log_file::LogFile, op::gen_rand_data, op::Op,
@@ -429,7 +481,9 @@ pub mod test_setup {
         verification::{Id, TimeTest},
     };
 
-    use super::{new_local_log, LocalLog, OpCreated, OpResult, SpDetails, SpToProcess};
+    use super::{
+        new_local_log, LocalLog, OpCreated, OpResult, SpDetails, SpStateToProcess, SpToProcess,
+    };
 
     pub struct LogTest<F: RWS> {
         ll: LocalLog<F>,
@@ -457,6 +511,7 @@ pub mod test_setup {
         pub fn create_sp(&mut self) -> (SpToProcess, SpDetails) {
             self.ti.set_current_time_valid();
             let ret = self.ll.create_local_sp(&mut self.ti).unwrap();
+            #[cfg(debug_assertions)]
             check_sp_prev(&mut self.ll.l, true);
             ret
         }
@@ -466,7 +521,9 @@ pub mod test_setup {
         }
 
         pub fn got_sp(&mut self, sp_p: SpToProcess) -> (SpToProcess, SpDetails) {
-            let ret = self.ll.received_sp(&mut self.ti, sp_p).unwrap();
+            let sp_p = SpStateToProcess::from_sp(sp_p, self.ll.l.serialize_option()).unwrap();
+            let ret = self.ll.received_sp(&mut self.ti, &sp_p).unwrap();
+            #[cfg(debug_assertions)]
             check_sp_prev(&mut self.ll.l, true);
             ret
         }
@@ -564,7 +621,7 @@ pub mod tests {
         ll.create_local_op(op1, &ti).unwrap();
         ti.sleep_op_until_late(op_t);
         let (sp_process, _) = ll.create_local_sp(&mut ti).unwrap();
-        assert_eq!(0, sp_process.not_included.len());
+        assert_eq!(0, sp_process.ops.not_included.len());
     }
 
     #[test]
@@ -582,8 +639,8 @@ pub mod tests {
         assert!(!op_result.status.include_in_hash);
         ti.sleep_op_until_late(op_t);
         let (sp_process, _) = ll.create_local_sp(&mut ti).unwrap();
-        assert_eq!(1, sp_process.late_included.len());
-        assert_eq!(0, sp_process.not_included.len());
+        assert_eq!(1, sp_process.ops.late_included.len());
+        assert_eq!(0, sp_process.ops.not_included.len());
     }
 
     #[test]

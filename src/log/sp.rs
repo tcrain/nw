@@ -113,8 +113,8 @@ pub struct SpInfo {
 pub struct Sp {
     pub info: BasicInfo,
     pub new_ops_supported: SupportCount, // number of new operations supported by this sp
-    pub support_hash: Hash,
-    pub supported_sp_info: EntryInfo, // the sp that this one comes after
+    pub support_hash: Hash,              // the hash of the Sp at supported_sp_info
+    pub supported_sp_info: EntryInfo,    // the sp that this one comes after
     pub additional_ops: Vec<EntryInfoData>, // all of these ops must be included in the SP, for example those that have smaller
                                             // time, or those that the SP wants to add some additional details about
 }
@@ -201,17 +201,21 @@ impl Sp {
             // the previous sp must be from the same id
             return Err(LogError::SpPrevIdDifferent);
         }
-        let TimeCheck {
-            time_not_passed: _,
-            include_in_hash,
-            arrived_late: _,
-        } = ti.arrived_time_check(self.info.time);
-        if include_in_hash {
-            // the sp must arrive after the time operations can arrive
-            return Err(LogError::SpArrivedEarly);
-        }
+        // time check is last since it doesn't mean the Sp is invalid
+        check_sp_time(self.info.time, ti)?;
         Ok(())
     }
+}
+
+pub fn check_sp_time<T: TimeInfo>(t: Time, ti: &T) -> Result<()> {
+    let TimeCheck {
+        include_in_hash, ..
+    } = ti.arrived_time_check(t);
+    if include_in_hash {
+        // the sp must arrive after the time operations can arrive
+        return Err(LogError::SpArrivedEarly);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

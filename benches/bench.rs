@@ -2,7 +2,7 @@ use std::fs::File;
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use nw::{
-    causal::causal_log::test_structs::{new_causal, CausalTestLog},
+    causal::causal_log::test_structs::{new_causal_test, CausalTestOrderedLog},
     file_sr::{CursorSR, FileSR},
     log::ordered_log::{
         DepBTree, DepHSet, DepVec, Dependents, SupBTree, SupHSet, SupVec, Supporters,
@@ -10,7 +10,10 @@ use nw::{
     log::{
         local_log::test_setup::LogTest,
         ordered_log::{
-            test_structs::{new_counter, run_ordered_rand, run_ordered_standard, CollectTestLog},
+            test_structs::{
+                new_counter, run_ordered_rand, run_ordered_standard, CollectTestLog,
+                OrderedStateTest,
+            },
             OrderedLog, OrderedLogRun, OrderedState,
         },
         LogIdx,
@@ -73,31 +76,31 @@ fn counter_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(
     logs
 }
 
-fn causal_bench_file() -> Vec<(CausalTestLog<FileSR>, TimeTest)> {
+fn causal_bench_file() -> Vec<(CausalTestOrderedLog<FileSR>, TimeTest)> {
     causal_bench_setup(FileSR::new)
 }
 
-fn causal_bench_mem() -> Vec<(CausalTestLog<CursorSR>, TimeTest)> {
+fn causal_bench_mem() -> Vec<(CausalTestOrderedLog<CursorSR>, TimeTest)> {
     causal_bench_setup(|_| CursorSR::new())
 }
 
-fn causal_bench_buf() -> Vec<(CausalTestLog<RWBuf<File>>, TimeTest)> {
+fn causal_bench_buf() -> Vec<(CausalTestOrderedLog<RWBuf<File>>, TimeTest)> {
     causal_bench_setup(RWBuf::new)
 }
 
 fn causal_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(
     open_fn: G,
-) -> Vec<(CausalTestLog<F>, TimeTest)> {
+) -> Vec<(CausalTestOrderedLog<F>, TimeTest)> {
     let num_logs = 4;
     let commit_count = 3;
     let mut logs = vec![];
     for i in 0..num_logs {
-        logs.push(new_causal(i, 100, commit_count, open_fn))
+        logs.push(new_causal_test(i, 100, commit_count, open_fn))
     }
     logs
 }
 
-fn run_ordered_standard_bench<L: OrderedLog, S: OrderedState>(
+fn run_ordered_standard_bench<L: OrderedLog, S: OrderedState + OrderedStateTest>(
     mut logs: Vec<(OrderedLogRun<L, S>, TimeTest)>,
 ) -> Vec<(OrderedLogRun<L, S>, TimeTest)> {
     let num_ops = 10;
@@ -107,7 +110,7 @@ fn run_ordered_standard_bench<L: OrderedLog, S: OrderedState>(
     logs
 }
 
-fn run_ordered_rand_bench<L: OrderedLog, S: OrderedState>(
+fn run_ordered_rand_bench<L: OrderedLog, S: OrderedState + OrderedStateTest>(
     mut logs: Vec<(OrderedLogRun<L, S>, TimeTest)>,
 ) -> Vec<(OrderedLogRun<L, S>, TimeTest)> {
     let num_ops = 20;

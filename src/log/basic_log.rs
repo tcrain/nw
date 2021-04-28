@@ -402,7 +402,7 @@ impl<F: RWS> Log<F> {
 
     pub fn check_sp<T>(
         &mut self,
-        sp: Sp,
+        sp: &SpState,
         late_included: &[EntryInfo],
         not_included: &[EntryInfo],
         ti: &T,
@@ -410,17 +410,16 @@ impl<F: RWS> Log<F> {
     where
         T: TimeInfo,
     {
-        sp.validate(&self.init_sp_entry_info.hash, ti)?;
-        let sp_supported_info = sp.supported_sp_info;
-        let sp_state = SpState::from_sp(sp, &mut self.serialize_option())?;
+        sp.sp.validate(&self.init_sp_entry_info.hash, ti)?;
+        let sp_supported_info = sp.sp.supported_sp_info;
         let sp_ref = self
-            .find_sp(sp_supported_info, Some(sp_state.get_entry_info()))?
+            .find_sp(sp_supported_info, Some(sp.get_entry_info()))?
             .ptr;
         let sp_ptr = sp_ref.borrow();
         let prev_sp_log_idx = sp_ptr.log_index;
         sp_ptr.entry.as_sp().check_sp_log_order(
             prev_sp_log_idx,
-            sp_state,
+            sp.clone(),
             &late_included,
             not_included.iter().cloned(),
             self.get_first_op(),
@@ -466,24 +465,24 @@ impl<F: RWS> Log<F> {
 
     pub fn check_sp_exact<T>(
         &mut self,
-        sp: Sp,
+        sp: &SpState,
         exact: &[EntryInfo],
         ti: &T,
     ) -> Result<(OuterSp, Vec<StrongPtrIdx>)>
     where
         T: TimeInfo,
     {
-        sp.validate(&self.init_sp_entry_info.hash, ti)?;
-        let sp_supported_info = sp.supported_sp_info;
-        let sp_state = SpState::from_sp(sp, &mut self.serialize_option())?;
+        sp.sp.validate(&self.init_sp_entry_info.hash, ti)?;
+        let sp_supported_info = sp.sp.supported_sp_info;
+        // let sp_state = SpState::from_sp(sp.clone(), &mut self.serialize_option())?;
         let sp_ref = self
-            .find_sp(sp_supported_info, Some(sp_state.get_entry_info()))?
+            .find_sp(sp_supported_info, Some(sp.get_entry_info()))?
             .ptr;
         let sp_ptr = sp_ref.borrow();
         let prev_sp_log_index = sp_ptr.log_index;
         sp_ptr.entry.as_sp().check_sp_exact(
             prev_sp_log_index,
-            sp_state,
+            sp.clone(),
             exact,
             self.get_first_op(),
             &self.state,
@@ -1195,7 +1194,7 @@ pub(crate) mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp.clone(), &[], &[], &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(&sp1, &[], &[], &ti).unwrap();
         let sp1_ops: Vec<LogEntryWeak> = sp1_ops.into_iter().map(|op| (&op).into()).collect();
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
@@ -1208,7 +1207,7 @@ pub(crate) mod tests {
         // be sure we dont insert the duplicate
         assert_eq!(
             LogError::SpAlreadyExists,
-            l.check_sp(sp1.sp, &[], &[], &ti).unwrap_err()
+            l.check_sp(&sp1, &[], &[], &ti).unwrap_err()
         );
 
         // create an Sp that supports the ops, but from a different owner
@@ -1229,7 +1228,14 @@ pub(crate) mod tests {
             l.get_initial_entry_info(),
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let (outer_sp2, sp2_ops) = l.check_sp(sp2, &[], &[], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l
+            .check_sp(
+                &SpState::from_sp(sp2, l.serialize_option()).unwrap(),
+                &[],
+                &[],
+                &ti,
+            )
+            .unwrap();
         let sp2_ops: Vec<LogEntryWeak> = sp2_ops.into_iter().map(|op| (&op).into()).collect();
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);
@@ -1250,7 +1256,14 @@ pub(crate) mod tests {
             Sp::new(id, ti.now_monotonic(), m, vec![], sp1_info)
         };
         ti.set_sp_time_valid(sp3.info.time);
-        let _outer_sp3 = l.check_sp(sp3, &[], &[], &ti).unwrap();
+        let _outer_sp3 = l
+            .check_sp(
+                &SpState::from_sp(sp3, l.serialize_option()).unwrap(),
+                &[],
+                &[],
+                &ti,
+            )
+            .unwrap();
         // check the sp prev pointers
         check_sp_prev(&mut l, true);
     }
@@ -1290,7 +1303,13 @@ pub(crate) mod tests {
         // when input op2 will be used, so it will create a hash error
         assert_eq!(
             LogError::SpHashNotComputed,
-            l.check_sp(sp1, &[], &[], &ti).unwrap_err()
+            l.check_sp(
+                &SpState::from_sp(sp1, l.serialize_option()).unwrap(),
+                &[],
+                &[],
+                &ti
+            )
+            .unwrap_err()
         );
         // use both sp1 and sp2, using included input to check_sp for sp1
         let hash_vec = vec![op1.hash, op2.hash];
@@ -1303,7 +1322,13 @@ pub(crate) mod tests {
         );
         ti.set_sp_time_valid(sp1.info.time);
 
-        l.check_sp(sp1, &[(&op1).into()], &[], &ti).unwrap();
+        l.check_sp(
+            &SpState::from_sp(sp1, l.serialize_option()).unwrap(),
+            &[(&op1).into()],
+            &[],
+            &ti,
+        )
+        .unwrap();
 
         // use both sp1 and sp2, using additional_ops input with to include sp1
         let op1_data = EntryInfoData {
@@ -1318,7 +1343,13 @@ pub(crate) mod tests {
             l.get_initial_entry_info(),
         );
         ti.set_sp_time_valid(sp1.info.time);
-        l.check_sp(sp1, &[], &[], &ti).unwrap();
+        l.check_sp(
+            &SpState::from_sp(sp1, l.serialize_option()).unwrap(),
+            &[],
+            &[],
+            &ti,
+        )
+        .unwrap();
         // check the sp prev pointers
         check_sp_prev(&mut l, true);
     }
@@ -1373,7 +1404,7 @@ pub(crate) mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp, &[], &not_included, &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(&sp1, &[], &not_included, &ti).unwrap();
         let sp1_ops: Vec<LogEntryWeak> = sp1_ops.into_iter().map(|op| (&op).into()).collect();
         // be sure there are unsupported ops
         for (entry, ifo) in outer_sp1.not_included_ops.iter().zip(not_included.iter()) {
@@ -1402,7 +1433,14 @@ pub(crate) mod tests {
             sp1_info,
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let (outer_sp2, sp2_ops) = l.check_sp(sp2, &[], &[], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l
+            .check_sp(
+                &SpState::from_sp(sp2, l.serialize_option()).unwrap(),
+                &[],
+                &[],
+                &ti,
+            )
+            .unwrap();
         let sp2_ops: Vec<LogEntryWeak> = sp2_ops.into_iter().map(|op| (&op).into()).collect();
         assert_eq!(0, outer_sp2.not_included_ops.len());
         l.insert_outer_sp(outer_sp2).unwrap();
@@ -1433,7 +1471,7 @@ pub(crate) mod tests {
         ti.set_sp_time_valid(sp1.sp.info.time);
         assert_eq!(
             LogError::PrevSpHasNoLastOp,
-            l.check_sp(sp1.sp, &[], &[], &ti).unwrap_err()
+            l.check_sp(&sp1, &[], &[], &ti).unwrap_err()
         );
         // check the sp prev pointers
         check_sp_prev(&mut l, true);
@@ -1464,7 +1502,7 @@ pub(crate) mod tests {
         .unwrap();
         ti.set_sp_time_valid(sp1.sp.info.time);
         let sp1_info = sp1.get_entry_info();
-        let (outer_sp1, sp1_ops) = l.check_sp(sp1.sp, &[], &[], &ti).unwrap();
+        let (outer_sp1, sp1_ops) = l.check_sp(&sp1, &[], &[], &ti).unwrap();
         assert_eq!(1, outer_sp1.not_included_ops.len());
         l.insert_outer_sp(outer_sp1).unwrap();
         check_log_indicies(&mut l);
@@ -1480,7 +1518,13 @@ pub(crate) mod tests {
             sp1_info,
         );
         ti.set_sp_time_valid(sp2.info.time);
-        let (outer_sp2, sp2_ops) = l.check_sp_exact(sp2, &[(&op2).into()], &ti).unwrap();
+        let (outer_sp2, sp2_ops) = l
+            .check_sp_exact(
+                &SpState::from_sp(sp2, l.serialize_option()).unwrap(),
+                &[(&op2).into()],
+                &ti,
+            )
+            .unwrap();
         assert_eq!(0, outer_sp2.not_included_ops.len());
         l.insert_outer_sp(outer_sp2).unwrap();
         check_log_indicies(&mut l);

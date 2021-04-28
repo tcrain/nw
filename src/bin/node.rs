@@ -1,5 +1,6 @@
 use std::{env::args, fs::File, time::Instant};
 
+use log::debug;
 use nw::{
     file_sr::{CursorSR, FileSR},
     log::local_log::test_setup::{add_ops_rand_order, add_sps, new_log_test},
@@ -34,9 +35,13 @@ fn run_node<F: RWS, G: Fn(File) -> F + Copy>(open_fn: G) {
     let now = Instant::now();
     for i in 1..1000 {
         // 1 op per log
+        let ops_time = Instant::now();
         add_ops_rand_order(&mut logs, &mut rng, i);
+        debug!("done ops iter {}: {}ms", i, ops_time.elapsed().as_millis());
         // 1 sp per log
+        let sp_time = Instant::now();
         add_sps(&mut logs, &mut rng);
+        debug!("done iter {}: {}ms", i, sp_time.elapsed().as_millis());
     }
     println!("duration: {}ms", now.elapsed().as_millis());
 }

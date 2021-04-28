@@ -1,14 +1,12 @@
 use std::{
-    cmp::Ordering,
     collections::VecDeque,
     error::Error,
     fmt::{Debug, Display},
-    iter::{repeat, repeat_with},
+    iter::repeat_with,
     mem,
 };
 
 use log::debug;
-use serde::{Deserialize, Serialize};
 
 use crate::{
     log::log_error::LogError,
@@ -271,6 +269,10 @@ pub struct PendingEntries<S: Supporters, D: Dependents> {
 impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
     type Supporter = S;
 
+    /// Each call to recv_sp returns the operations in causal order that have been committed by
+    /// the reception of the Sp (if there are any).
+    /// Each Op must be supported by its creators Sp, the local Sp and a total of self.commit_count
+    /// Sps.
     fn recv_sp<I: Iterator<Item = OpEntryInfo>>(
         &mut self,
         info: SpInfo,
@@ -667,162 +669,66 @@ where
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VecClock(Vec<u64>);
-
-impl Default for VecClock {
-    fn default() -> Self {
-        VecClock(vec![])
-    }
-}
-
-impl From<Vec<u64>> for VecClock {
-    fn from(v: Vec<u64>) -> Self {
-        VecClock(v)
-    }
-}
-
-impl VecClock {
-    #[inline(always)]
-    fn get_val(&self, id: Id) -> u64 {
-        if id as usize >= self.0.len() {
-            return 0;
-        }
-        self.0[id as usize]
-    }
-
-    #[inline(always)]
-    fn set_entry(&mut self, id: Id, val: u64) {
-        let l = self.0.len();
-        if id as usize >= l {
-            self.0.extend(repeat(0).take((id + 1) as usize - l));
-        }
-        self.0[id as usize] = val;
-    }
-
-    fn max_in_place(&mut self, other: &Self) {
-        let l = self.0.len();
-        let other_l = other.0.len();
-        if other_l > l {
-            self.0.extend(repeat(0).take(other_l - l));
-        }
-        for (o_v, s_v) in other.0.iter().cloned().zip(self.0.iter_mut()) {
-            if o_v > *s_v {
-                *s_v = o_v;
-            }
-        }
-    }
-}
-
-impl PartialEq for VecClock {
-    #[inline(always)]
-    fn eq(&self, other: &Self) -> bool {
-        self.partial_cmp(other)
-            .map_or(false, |o| matches!(o, Ordering::Equal))
-    }
-}
-
-fn check_eq_iter<I: Iterator<Item = (u64, u64)>>(iter: I) -> Option<Ordering> {
-    let mut res = None;
-    for (l, r) in iter {
-        match l.cmp(&r) {
-            Ordering::Less => {
-                if let Some(o) = res {
-                    if matches!(o, Ordering::Greater) {
-                        return None;
-                    }
-                }
-                res = Some(Ordering::Less)
-            }
-            Ordering::Equal => {
-                let _ = res.get_or_insert(Ordering::Equal);
-            }
-            Ordering::Greater => {
-                if let Some(o) = res {
-                    if matches!(o, Ordering::Less) {
-                        return None;
-                    }
-                }
-                res = Some(Ordering::Greater)
-            }
-        }
-    }
-    res
-}
-
-impl PartialOrd for VecClock {
-    #[inline(always)]
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let dif = self.0.len() as isize - other.0.len() as isize;
-        match dif.cmp(&0) {
-            Ordering::Equal => check_eq_iter(self.0.iter().cloned().zip(other.0.iter().cloned())),
-            Ordering::Less => check_eq_iter(
-                self.0
-                    .iter()
-                    .cloned()
-                    .chain(repeat(0))
-                    .zip(other.0.iter().cloned()),
-            ),
-            Ordering::Greater => check_eq_iter(
-                self.0
-                    .iter()
-                    .cloned()
-                    .zip(other.0.iter().cloned().chain(repeat(0))),
-            ),
-        }
-    }
-}
-
 pub mod test_structs {
+    use std::fmt::Debug;
     use std::fs::File;
 
     use bincode::{deserialize, serialize};
     use log::debug;
+    use serde::{de::DeserializeOwned, Serialize};
 
     use crate::{
+        causal::vector_clock::{VecClock, VectorClock},
         log::{
             basic_log::Log,
-            local_log::new_local_log,
+            local_log::{new_local_log, LocalLog},
             log_file::open_log_file,
             op::{to_op_data, OpData, OpEntryInfo},
             ordered_log::{
-                test_structs::OrderedLogTest, DepVec, OrderedLogContainer, OrderedLogRun,
-                OrderedState, OrderingError, Result, SupVec,
+                test_structs::{OrderedLogTest, OrderedStateTest},
+                DepVec, OrderedLogContainer, OrderedLogRun, OrderedState, OrderingError, Result,
+                SupVec,
             },
         },
         rw_buf::RWS,
         verification::{Id, TimeTest},
     };
 
-    use super::{PendingEntries, VecClock};
+    use super::PendingEntries;
 
     // Implementation of OrderedState that tracks a vector clock.
-    pub struct CausalLogClock {
-        pub(crate) c: VecClock,
-        pub(crate) c_all: VecClock, // keeps max of all operaions added, to make sure we commit all operations in the end
+    pub struct CausalLogClock<K: Debug, V: VectorClock<K = K, V = u64>> {
+        pub(crate) c: V,
+        pub(crate) c_all: V, // keeps max of all operaions added, to make sure we commit all operations in the end
         op_count: u64,
-        id: Id,
+        id: K,
     }
 
-    impl CausalLogClock {
+    impl<K: Debug, V: DeserializeOwned + VectorClock<K = K, V = u64>> CausalLogClock<K, V> {
         fn update_c_all(&mut self, data: &OpData) {
-            let v: VecClock = deserialize(data).unwrap();
+            let v: V = deserialize(data).unwrap();
             self.c_all.max_in_place(&v);
         }
     }
 
-    impl OrderedState for CausalLogClock {
+    impl<K: Debug + Clone, V: Clone + Serialize + VectorClock<K = K, V = u64>> OrderedStateTest
+        for CausalLogClock<K, V>
+    {
         fn create_local_op(&mut self) -> Result<OpData> {
             self.op_count += 1;
             let mut c = self.c.clone();
-            c.set_entry(self.id, self.op_count);
+            c.set_entry(self.id.clone(), self.op_count);
             self.c_all.max_in_place(&c);
             Ok(to_op_data(serialize(&c).unwrap()))
         }
+    }
 
+    impl<K: Debug, V: Debug + DeserializeOwned + VectorClock<K = K, V = u64>> OrderedState
+        for CausalLogClock<K, V>
+    {
         fn check_op(&mut self, op: &OpData) -> Result<()> {
             // just check is deserialzes ok
-            match deserialize::<VecClock>(op) {
+            match deserialize::<VecClock<Id, u64>>(op) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(OrderingError::Custom(e)),
             }
@@ -834,9 +740,9 @@ pub mod test_structs {
 
         fn after_recv_sp<'a, I: Iterator<Item = &'a OpEntryInfo>>(&mut self, from: Id, deps: I) {
             for op in deps {
-                let v: VecClock = deserialize(&op.op.data).unwrap();
+                let v: V = deserialize(&op.op.data).unwrap();
                 debug!(
-                    "got vec {:?} from {}, my id {}, mine {:?}",
+                    "got vec {:?} from {}, my id {:?}, mine {:?}",
                     v, from, self.id, self.c
                 );
                 if self.c > v {
@@ -847,15 +753,28 @@ pub mod test_structs {
         }
     }
 
-    pub type CausalTestLog<F> =
-        OrderedLogRun<OrderedLogTest<F, PendingEntries<SupVec, DepVec>>, CausalLogClock>;
+    pub type CausalTestLog<F> = OrderedLogRun<
+        OrderedLogTest<F, PendingEntries<SupVec, DepVec>>,
+        CausalLogClock<Id, VecClock<Id, u64>>,
+    >;
 
-    pub fn new_causal<F: RWS, G: Fn(File) -> F + Copy>(
+    pub type CausalTestOrderedLog<F> = OrderedLogRun<
+        OrderedLogContainer<F, PendingEntries<SupVec, DepVec>>,
+        CausalLogClock<Id, VecClock<Id, u64>>,
+    >;
+
+    pub type CausalTestSetup<F> = (
+        LocalLog<F>,
+        CausalLogClock<Id, VecClock<Id, u64>>,
+        PendingEntries<SupVec, DepVec>,
+    );
+
+    fn new_causal_setup<F: RWS, G: Fn(File) -> F + Copy>(
         id: Id,
         test_idx: usize,
         commit_count: usize,
         open_fn: G,
-    ) -> (CausalTestLog<F>, TimeTest) {
+    ) -> CausalTestSetup<F> {
         let f = new_local_log(
             id,
             Log::new(
@@ -869,13 +788,34 @@ pub mod test_structs {
         )
         .unwrap();
         let pe = PendingEntries::new(commit_count, id);
-        let l = OrderedLogTest::new(OrderedLogContainer::new(f, pe));
         let c = CausalLogClock {
             c: VecClock::default(),
             c_all: VecClock::default(),
             op_count: 0,
             id,
         };
+        (f, c, pe)
+    }
+
+    pub(crate) fn new_causal_ordered_test<F: RWS, G: Fn(File) -> F + Copy>(
+        id: Id,
+        test_idx: usize,
+        commit_count: usize,
+        open_fn: G,
+    ) -> (CausalTestLog<F>, TimeTest) {
+        let (f, c, pe) = new_causal_setup(id, test_idx, commit_count, open_fn);
+        let l = OrderedLogTest::new(OrderedLogContainer::new(f, pe));
+        (OrderedLogRun::new(id, l, c), TimeTest::new())
+    }
+
+    pub fn new_causal_test<F: RWS, G: Fn(File) -> F + Copy>(
+        id: Id,
+        test_idx: usize,
+        commit_count: usize,
+        open_fn: G,
+    ) -> (CausalTestOrderedLog<F>, TimeTest) {
+        let (f, c, pe) = new_causal_setup(id, test_idx, commit_count, open_fn);
+        let l = OrderedLogContainer::new(f, pe);
         (OrderedLogRun::new(id, l, c), TimeTest::new())
     }
 }
@@ -896,40 +836,7 @@ mod test {
         verification::TimeTest,
     };
 
-    use super::{
-        test_structs::{new_causal, CausalTestLog},
-        VecClock,
-    };
-
-    #[test]
-    fn vec_clock() {
-        assert!(VecClock::from(vec![1, 2, 3, 4]) == VecClock::from(vec![1, 2, 3, 4]));
-        assert!(VecClock::from(vec![1, 2, 3, 4]) == VecClock::from(vec![1, 2, 3, 4, 0, 0, 0]));
-        assert!(VecClock::from(vec![2, 2, 3, 4]) >= VecClock::from(vec![1, 2, 3, 4]));
-        assert!(VecClock::from(vec![2, 2, 3, 4, 5]) > VecClock::from(vec![1, 2, 3, 4]));
-        assert!(VecClock::from(vec![1, 2, 3, 4]) > VecClock::from(vec![]));
-        assert!(VecClock::from(vec![]) < VecClock::from(vec![1, 2, 3, 4]));
-
-        assert!(VecClock::from(vec![1, 2])
-            .partial_cmp(&VecClock::from(vec![2, 1]))
-            .is_none());
-        assert!(VecClock::from(vec![1, 1, 1])
-            .partial_cmp(&VecClock::from(vec![2, 2]))
-            .is_none());
-
-        let mut v1 = VecClock::default();
-        let mut v2 = VecClock::default();
-        for (i, v) in (0..10).rev().enumerate() {
-            v1.set_entry(v, i as u64);
-            v2.set_entry(i as u64, v);
-        }
-        assert!(v1 == v2);
-
-        let mut v1 = VecClock::from(vec![1, 2, 3, 4]);
-        let v2 = VecClock::from(vec![4, 1, 1, 1, 1]);
-        v1.max_in_place(&v2);
-        assert_eq!(v1, VecClock::from(vec![4, 2, 3, 4, 1]));
-    }
+    use super::test_structs::{new_causal_ordered_test, CausalTestLog};
 
     #[test]
     fn causal_single() {
@@ -938,7 +845,12 @@ mod test {
         let commit_count = 3;
         let mut logs = vec![];
         for id in 0..num_logs {
-            logs.push(new_causal(id, id as usize, commit_count, RWBuf::new));
+            logs.push(new_causal_ordered_test(
+                id,
+                id as usize,
+                commit_count,
+                RWBuf::new,
+            ));
         }
         run_ordered_once(&mut logs);
         check_logs(&mut logs);
@@ -952,7 +864,12 @@ mod test {
                 for commit_count in 1..=num_logs as usize {
                     let mut logs = vec![];
                     for id in 0..num_logs {
-                        logs.push(new_causal(id, 100 + id as usize, commit_count, RWBuf::new));
+                        logs.push(new_causal_ordered_test(
+                            id,
+                            100 + id as usize,
+                            commit_count,
+                            RWBuf::new,
+                        ));
                     }
                     run_ordered_rand(&mut logs, num_ops, seed);
                     // check the logs have the same vector clock
@@ -972,7 +889,12 @@ mod test {
                 for commit_count in 1..=num_logs as usize {
                     let mut logs = vec![];
                     for id in 0..num_logs {
-                        logs.push(new_causal(id, 200 + id as usize, commit_count, RWBuf::new));
+                        logs.push(new_causal_ordered_test(
+                            id,
+                            200 + id as usize,
+                            commit_count,
+                            RWBuf::new,
+                        ));
                     }
                     run_ordered_standard(&mut logs, num_ops, num_iterations, seed);
                     // check the logs have the same vector clock
