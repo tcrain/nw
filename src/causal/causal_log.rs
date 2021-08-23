@@ -158,7 +158,7 @@ impl<S: Supporters, D: Dependents> PendingEntry<S, D> {
     fn as_op_mut(&mut self) -> &mut CausalOp<S> {
         match self {
             PendingEntry::Op(op) => op,
-            _ => panic!(format!("expected op, {:?}", self)),
+            _ => panic!("expected op, {:?}", self),
         }
     }
     #[inline(always)]
@@ -288,7 +288,7 @@ impl<S: Supporters, D: Dependents> LogOrdering for PendingEntries<S, D> {
                 if err == CausalError::EntryAlreadyCommitted {
                     true
                 } else {
-                    panic!(format!("{:?}", err))
+                    panic!("{:?}", err)
                 }
             }
         };

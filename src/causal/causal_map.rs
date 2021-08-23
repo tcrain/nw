@@ -140,5 +140,5 @@ impl<V: Hash + Eq> Default for AddWins<V> {
 impl<V: SendValue + Hash + Eq> Value for AddWins<V> {
     type Sv = V;
 
-    fn process_new_val(&mut self, v: Self::Sv) {}
+    fn process_new_val(&mut self, _v: Self::Sv) {}
 }

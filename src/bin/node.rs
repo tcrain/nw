@@ -21,7 +21,7 @@ fn main() {
         0 => run_node(RWBuf::new),
         1 => run_node(FileSR::new),
         2 => run_node(|_| CursorSR::new()),
-        _ => panic!(msg),
+        _ => panic!("{}", msg),
     }
 }
 
