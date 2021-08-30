@@ -72,11 +72,12 @@ pub struct FileOpInfo {
 pub fn open_log_file<F: RWS, G: Fn(File) -> F>(
     path_string: &str,
     clear: bool,
+    append: bool,
     open_fn: G,
 ) -> Result<LogFile<F>> {
     let path = Path::new(path_string);
     info!("Opening log file {}", path.display());
-    let file = open_file(path, clear)?;
+    let file = open_file(path, clear, append)?;
     // let file = Cursor::new(Vec::new());
     let options = options();
     let mut l = LogFile {
@@ -100,12 +101,23 @@ pub fn open_log_file<F: RWS, G: Fn(File) -> F>(
     Ok(l)
 }
 
-fn open_file(path: &Path, truncate: bool) -> Result<File> {
+fn open_file(path: &Path, clear_file: bool, append: bool) -> Result<File> {
+    if clear_file {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|err| {
+                error!("Error opening file: {}", err);
+                LogError::IOError(LogIOError(err))
+            })?;
+    }
     OpenOptions::new()
         .read(true)
         .write(true)
+        .append(append)
         .create(true)
-        .truncate(truncate)
         .open(path)
         .map_err(|err| {
             error!("Error opening file: {}", err);
@@ -325,7 +337,7 @@ mod tests {
 
     #[test]
     fn append_log() {
-        let mut l = open_log_file("log_files/testfile-1.log", true, FileSR::new).unwrap();
+        let mut l = open_log_file("log_files/testfile-1.log", true, false, FileSR::new).unwrap();
         let mut entrys = vec![];
         let count: u64 = 5;
         // let mut prv_idx = 0;
@@ -364,7 +376,7 @@ mod tests {
 
     #[test]
     fn read_write_u64() {
-        let mut l = open_log_file("log_files/testfile-2.log", true, FileSR::new).unwrap();
+        let mut l = open_log_file("log_files/testfile-2.log", true, false, FileSR::new).unwrap();
         let count = 10;
         for i in 0..count {
             let op_info = l.write_u64(i).unwrap();

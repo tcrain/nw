@@ -399,8 +399,8 @@ impl<L: OrderedLog, S: OrderedState> OrderedLogRun<L, S> {
 }
 
 /// Contains a local log, plus the LogOrdering trait to keep track.
-pub struct OrderedLogContainer<F: RWS, O: LogOrdering> {
-    pub(crate) l: LocalLog<F>,
+pub struct OrderedLogContainer<F: RWS, AppendF: RWS, O: LogOrdering> {
+    pub(crate) l: LocalLog<F, AppendF>,
     pub(crate) ordering: O,
 }
 
@@ -419,10 +419,11 @@ pub struct OrderedExactSp<S: Supporters> {
 /// The main interface to the underlying log.
 pub trait OrderedLog {
     type File: RWS;
+    type AppendFile: RWS;
     type Ordering: LogOrdering;
 
     fn get_ordering(&self) -> &Self::Ordering;
-    fn get_log_mut(&mut self) -> &mut Log<Self::File>;
+    fn get_log_mut(&mut self) -> &mut Log<Self::File, Self::AppendFile>;
     fn create_local_sp<T: TimeInfo>(
         &mut self,
         ti: &mut T,
@@ -454,14 +455,15 @@ pub struct SpExactResult<S: Supporters> {
 }
 
 /// Inputs operations to the log and the ordering as they are received.
-impl<F: RWS, O: LogOrdering> OrderedLogContainer<F, O> {
-    pub fn new(l: LocalLog<F>, ordering: O) -> Self {
+impl<F: RWS, AppendF: RWS, O: LogOrdering> OrderedLogContainer<F, AppendF, O> {
+    pub fn new(l: LocalLog<F, AppendF>, ordering: O) -> Self {
         OrderedLogContainer { l, ordering }
     }
 }
 
-impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
+impl<F: RWS, AppendF: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, AppendF, O> {
     type File = F;
+    type AppendFile = AppendF;
     type Ordering = O;
 
     #[inline(always)]
@@ -470,7 +472,7 @@ impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogContainer<F, O> {
     }
 
     #[inline(always)]
-    fn get_log_mut(&mut self) -> &mut Log<F> {
+    fn get_log_mut(&mut self) -> &mut Log<F, AppendF> {
         &mut self.l.l
     }
 
@@ -1296,7 +1298,9 @@ pub mod test_structs {
     }
 
     /// Used to check all the logs have the same state of Ops and Sps.
-    pub fn check_ordered_logs<F: RWS, O: LogOrdering>(logs: &[&OrderedLogTest<F, O>]) {
+    pub fn check_ordered_logs<F: RWS, AppendF: RWS, O: LogOrdering>(
+        logs: &[&OrderedLogTest<F, AppendF, O>],
+    ) {
         let prev_l = logs[0];
         for &l in &logs[1..] {
             // check the log test objects are equal by checking they contain eachother.
@@ -1310,8 +1314,8 @@ pub mod test_structs {
     /// and Sps. Used for testing, where check_ordered_logs is called
     /// after the test to ensure all logs end up with the same state
     /// of Ops and Sps.
-    pub struct OrderedLogTest<F: RWS, O: LogOrdering> {
-        l: OrderedLogContainer<F, O>,
+    pub struct OrderedLogTest<F: RWS, AppendF: RWS, O: LogOrdering> {
+        l: OrderedLogContainer<F, AppendF, O>,
         // the number of times each op has been received
         received_ops: HashMap<HashEntryInfo, usize>,
         // the number of times each Op has been supported by each
@@ -1320,8 +1324,8 @@ pub mod test_structs {
         completed_ops: HashSet<HashEntryInfo>,
     }
 
-    impl<F: RWS, O: LogOrdering> OrderedLogTest<F, O> {
-        pub fn new(l: OrderedLogContainer<F, O>) -> Self {
+    impl<F: RWS, AppendF: RWS, O: LogOrdering> OrderedLogTest<F, AppendF, O> {
+        pub fn new(l: OrderedLogContainer<F, AppendF, O>) -> Self {
             OrderedLogTest {
                 l,
                 received_ops: HashMap::default(),
@@ -1331,7 +1335,7 @@ pub mod test_structs {
         }
 
         /// Checks if other has at least all the set of events as self.
-        pub fn check_other_contains_all(&self, other: &OrderedLogTest<F, O>) {
+        pub fn check_other_contains_all(&self, other: &OrderedLogTest<F, AppendF, O>) {
             // be sure all ops were received by all nodes
             for (op, _) in self.received_ops.iter() {
                 other
@@ -1390,15 +1394,16 @@ pub mod test_structs {
         }
     }
 
-    impl<F: RWS, O: LogOrdering> OrderedLog for OrderedLogTest<F, O> {
+    impl<F: RWS, AppendF: RWS, O: LogOrdering> OrderedLog for OrderedLogTest<F, AppendF, O> {
         type File = F;
+        type AppendFile = AppendF;
         type Ordering = O;
 
         fn get_ordering(&self) -> &O {
             self.l.get_ordering()
         }
 
-        fn get_log_mut(&mut self) -> &mut Log<F> {
+        fn get_log_mut(&mut self) -> &mut Log<F, AppendF> {
             self.l.get_log_mut()
         }
 
@@ -1571,22 +1576,36 @@ pub mod test_structs {
         }
     }
 
-    pub type CollectTestLog<F> =
-        OrderedLogRun<OrderedLogTest<F, CollectOrdered<SupVec>>, CounterState>;
+    pub type CollectTestLog<F, AppendF> =
+        OrderedLogRun<OrderedLogTest<F, AppendF, CollectOrdered<SupVec>>, CounterState>;
 
-    pub fn new_counter<F: RWS, G: Fn(File) -> F + Copy>(
+    pub fn new_counter<
+        F: RWS,
+        AppendF: RWS,
+        G: Fn(File) -> F + Copy,
+        AppendG: Fn(File) -> AppendF + Copy,
+    >(
         id: Id,
         test_idx: usize,
         commit_count: usize,
         open_fn: G,
-    ) -> (CollectTestLog<F>, TimeTest) {
+        open_append_fn: AppendG,
+    ) -> (CollectTestLog<F, AppendF>, TimeTest) {
         let f = new_local_log(
             id,
             Log::new(
                 open_log_file(
                     &format!("log_files/ordered_log{}_{}.log", test_idx, id),
                     true,
+                    false,
                     open_fn,
+                )
+                .unwrap(),
+                open_log_file(
+                    &format!("log_files/ordered_append_log{}_{}.log", test_idx, id),
+                    true,
+                    true,
+                    open_append_fn,
                 )
                 .unwrap(),
             ),
@@ -1681,7 +1700,13 @@ mod tests {
                 for commit_count in 1..=num_logs as usize {
                     let mut logs = vec![];
                     for id in 0..num_logs {
-                        logs.push(new_counter(id, id as usize, commit_count, RWBuf::new));
+                        logs.push(new_counter(
+                            id,
+                            id as usize,
+                            commit_count,
+                            RWBuf::new,
+                            RWBuf::new,
+                        ));
                     }
                     run_ordered_rand(&mut logs, num_ops, seed);
                     // check the logs have the same vector clock
@@ -1698,7 +1723,13 @@ mod tests {
         let commit_count = 3;
         let mut logs = vec![];
         for id in 0..num_logs {
-            logs.push(new_counter(id, 100 + id as usize, commit_count, RWBuf::new));
+            logs.push(new_counter(
+                id,
+                100 + id as usize,
+                commit_count,
+                RWBuf::new,
+                RWBuf::new,
+            ));
         }
         run_ordered_once(&mut logs);
         check_logs(&mut logs);
@@ -1714,7 +1745,13 @@ mod tests {
                 let commit_count = 3;
                 let mut logs = vec![];
                 for id in 0..num_logs {
-                    logs.push(new_counter(id, 200 + id as usize, commit_count, RWBuf::new));
+                    logs.push(new_counter(
+                        id,
+                        200 + id as usize,
+                        commit_count,
+                        RWBuf::new,
+                        RWBuf::new,
+                    ));
                 }
                 run_ordered_standard(&mut logs, num_ops, iterations, seed);
                 check_logs(&mut logs);
@@ -1722,7 +1759,7 @@ mod tests {
         }
     }
 
-    fn check_logs<F: RWS>(logs: &mut [(CollectTestLog<F>, TimeTest)]) {
+    fn check_logs<F: RWS, AppendF: RWS>(logs: &mut [(CollectTestLog<F, AppendF>, TimeTest)]) {
         let test_logs: Vec<_> = logs.iter().map(|(l, _)| l.get_l()).collect();
         check_ordered_logs(&test_logs);
 

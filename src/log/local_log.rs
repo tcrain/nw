@@ -17,13 +17,16 @@ use super::{
     sp::{Sp, SpInfo, SpState},
 };
 
-pub struct LocalLog<F: RWS> {
+pub struct LocalLog<F: RWS, AppendF: RWS> {
     id: Id,
-    pub(crate) l: Log<F>,
+    pub(crate) l: Log<F, AppendF>,
     last_sp: EntryInfo,
 }
 
-pub fn new_local_log<F: RWS>(id: Id, mut l: Log<F>) -> Result<LocalLog<F>> {
+pub fn new_local_log<F: RWS, AppendF: RWS>(
+    id: Id,
+    mut l: Log<F, AppendF>,
+) -> Result<LocalLog<F, AppendF>> {
     let last_sp = l
         .get_last_sp_id(id)
         .or_else(|_| l.get_initial_sp())?
@@ -192,7 +195,7 @@ fn to_op_entry_info(ops: &[StrongPtrIdx]) -> Vec<OpEntryInfo> {
     ser
 }
 
-impl<F: RWS> LocalLog<F> {
+impl<F: RWS, AppendF: RWS> LocalLog<F, AppendF> {
     /// Inputs an operation in the log.
     /// Returns the hash of the operation.
     pub fn create_local_op<T>(&mut self, op: Op, ti: &T) -> Result<OpResult>
@@ -485,24 +488,39 @@ pub mod test_setup {
         new_local_log, LocalLog, OpCreated, OpResult, SpDetails, SpStateToProcess, SpToProcess,
     };
 
-    pub struct LogTest<F: RWS> {
-        ll: LocalLog<F>,
+    pub struct LogTest<F: RWS, AppendF: RWS> {
+        ll: LocalLog<F, AppendF>,
         ti: TimeTest,
         id: Id,
     }
 
-    pub fn get_log_file<F: RWS, G: Fn(File) -> F>(idx: usize, open_fn: G) -> LogFile<F> {
-        open_log_file(&format!("log_files/local_log{}.log", idx), true, open_fn).unwrap()
+    pub fn get_log_file<F: RWS, G: Fn(File) -> F>(
+        idx: usize,
+        append: bool,
+        open_fn: G,
+    ) -> LogFile<F> {
+        let file_path = match append {
+            true => format!("log_files/local_append_log{}.log", idx),
+            false => format!("log_files/local_log{}.log", idx),
+        };
+        open_log_file(&file_path, true, append, open_fn).unwrap()
     }
 
-    pub fn new_log_test<F: RWS, G: Fn(File) -> F>(id: Id, open_fn: G) -> LogTest<F> {
+    pub fn new_log_test<F: RWS, AppendF: RWS, G: Fn(File) -> F, AppendG: Fn(File) -> AppendF>(
+        id: Id,
+        open_fn: G,
+        open_append_fn: AppendG,
+    ) -> LogTest<F, AppendF> {
         let ti = TimeTest::new();
-        let l = Log::new(get_log_file(3 + id as usize, open_fn));
+        let l = Log::new(
+            get_log_file(3 + id as usize, false, open_fn),
+            get_log_file(3 + id as usize, true, open_append_fn),
+        );
         let ll = new_local_log(id, l).unwrap();
         LogTest { ll, ti, id }
     }
 
-    impl<F: RWS> LogTest<F> {
+    impl<F: RWS, AppendF: RWS> LogTest<F, AppendF> {
         pub fn create_op(&mut self) -> OpResult {
             let op1 = Op::new(self.id, gen_rand_data(), &mut self.ti);
             self.ll.create_local_op(op1, &self.ti).unwrap()
@@ -529,8 +547,8 @@ pub mod test_setup {
         }
     }
 
-    pub fn add_ops_rand_order<F: RWS>(
-        logs: &mut [LogTest<F>],
+    pub fn add_ops_rand_order<F: RWS, AppendF: RWS>(
+        logs: &mut [LogTest<F, AppendF>],
         rng: &mut StdRng,
         num_iterations: u64,
     ) {
@@ -561,7 +579,7 @@ pub mod test_setup {
         }
     }
 
-    pub fn add_sps<F: RWS>(logs: &mut [LogTest<F>], rng: &mut StdRng) {
+    pub fn add_sps<F: RWS, AppendF: RWS>(logs: &mut [LogTest<F, AppendF>], rng: &mut StdRng) {
         let num_logs = logs.len();
         let mut new_sps = vec![];
         for (i, l) in logs.iter_mut().enumerate() {
@@ -604,7 +622,10 @@ pub mod tests {
     fn local_log_add_op() {
         let mut ti = TimeTest::new();
         let id = 0;
-        let l = Log::new(get_log_file(0, RWBuf::new));
+        let l = Log::new(
+            get_log_file(0, false, RWBuf::new),
+            get_log_file(0, true, RWBuf::new),
+        );
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = Op::new(id, gen_rand_data(), &mut ti);
         ll.create_local_op(op1, &ti).unwrap();
@@ -614,7 +635,10 @@ pub mod tests {
     fn local_log_sp() {
         let mut ti = TimeTest::new();
         let id = 0;
-        let l = Log::new(get_log_file(1, RWBuf::new));
+        let l = Log::new(
+            get_log_file(1, false, RWBuf::new),
+            get_log_file(1, true, RWBuf::new),
+        );
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = Op::new(id, gen_rand_data(), &mut ti);
         let op_t = op1.info.time;
@@ -628,7 +652,10 @@ pub mod tests {
     fn local_log_late_op() {
         let mut ti = TimeTest::new();
         let id = 0;
-        let l = Log::new(get_log_file(2, RWBuf::new));
+        let l = Log::new(
+            get_log_file(2, false, RWBuf::new),
+            get_log_file(2, true, RWBuf::new),
+        );
         let mut ll = new_local_log(id, l).unwrap();
         let op1 = make_op_late(
             OpState::new(id, gen_rand_data(), &mut ti, ll.l.serialize_option()).unwrap(),
@@ -648,7 +675,7 @@ pub mod tests {
         let num_logs = 5;
         let mut logs = vec![];
         for i in 0..num_logs {
-            logs.push(new_log_test(100 + i, RWBuf::new))
+            logs.push(new_log_test(100 + i, RWBuf::new, RWBuf::new))
         }
         let num_ops = 5;
         for i in 0..num_ops {
@@ -670,7 +697,7 @@ pub mod tests {
         let num_logs = 5;
         let mut logs = vec![];
         for i in 0..num_logs {
-            logs.push(new_log_test(200 + i, RWBuf::new))
+            logs.push(new_log_test(200 + i, RWBuf::new, RWBuf::new))
         }
         for i in 1..3 {
             // 1 op per log

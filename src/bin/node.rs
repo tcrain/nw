@@ -30,7 +30,7 @@ fn run_node<F: RWS, G: Fn(File) -> F + Copy>(open_fn: G) {
     let num_logs = 5;
     let mut logs = vec![];
     for i in 0..num_logs {
-        logs.push(new_log_test(200 + i, open_fn))
+        logs.push(new_log_test(200 + i, open_fn, open_fn))
     }
     let now = Instant::now();
     for i in 1..1000 {

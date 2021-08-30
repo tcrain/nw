@@ -30,72 +30,98 @@ use rand::{
     thread_rng, SeedableRng,
 };
 
-fn transfer_bench_file() -> Vec<LogTest<FileSR>> {
-    transfer_bench_setup(FileSR::new)
+fn transfer_bench_file() -> Vec<LogTest<FileSR, FileSR>> {
+    transfer_bench_setup(FileSR::new, FileSR::new)
 }
 
-fn transfer_bench_mem() -> Vec<LogTest<CursorSR>> {
-    transfer_bench_setup(|_| CursorSR::new())
+fn transfer_bench_mem() -> Vec<LogTest<CursorSR, CursorSR>> {
+    transfer_bench_setup(|_| CursorSR::new(), |_| CursorSR::new())
 }
 
-fn transfer_bench_buf() -> Vec<LogTest<RWBuf<File>>> {
-    transfer_bench_setup(RWBuf::new)
+fn transfer_bench_buf() -> Vec<LogTest<RWBuf<File>, RWBuf<File>>> {
+    transfer_bench_setup(RWBuf::new, RWBuf::new)
 }
 
-fn transfer_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(open_fn: G) -> Vec<LogTest<F>> {
+fn transfer_bench_setup<
+    F: RWS,
+    AppendF: RWS,
+    G: Fn(File) -> F + Copy,
+    AppendG: Fn(File) -> AppendF + Copy,
+>(
+    open_fn: G,
+    open_append_fn: AppendG,
+) -> Vec<LogTest<F, AppendF>> {
     // this test inserts one op per participant in a random order at each log
     let num_logs = 5;
     let mut logs = vec![];
     for i in 0..num_logs {
-        logs.push(new_log_test(200 + i, open_fn))
+        logs.push(new_log_test(200 + i, open_fn, open_append_fn))
     }
     logs
 }
 
-fn counter_bench_file() -> Vec<(CollectTestLog<FileSR>, TimeTest)> {
-    counter_bench_setup(FileSR::new)
+fn counter_bench_file() -> Vec<(CollectTestLog<FileSR, FileSR>, TimeTest)> {
+    counter_bench_setup(FileSR::new, FileSR::new)
 }
 
-fn counter_bench_mem() -> Vec<(CollectTestLog<CursorSR>, TimeTest)> {
-    counter_bench_setup(|_| CursorSR::new())
+fn counter_bench_mem() -> Vec<(CollectTestLog<CursorSR, CursorSR>, TimeTest)> {
+    counter_bench_setup(|_| CursorSR::new(), |_| CursorSR::new())
 }
 
-fn counter_bench_buf() -> Vec<(CollectTestLog<RWBuf<File>>, TimeTest)> {
-    counter_bench_setup(RWBuf::new)
+fn counter_bench_buf() -> Vec<(CollectTestLog<RWBuf<File>, RWBuf<File>>, TimeTest)> {
+    counter_bench_setup(RWBuf::new, RWBuf::new)
 }
 
-fn counter_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(
+fn counter_bench_setup<
+    F: RWS,
+    AppendF: RWS,
+    G: Fn(File) -> F + Copy,
+    AppendG: Fn(File) -> AppendF + Copy,
+>(
     open_fn: G,
-) -> Vec<(CollectTestLog<F>, TimeTest)> {
+    open_append_fn: AppendG,
+) -> Vec<(CollectTestLog<F, AppendF>, TimeTest)> {
     let num_logs = 4;
     let commit_count = 3;
     let mut logs = vec![];
     for i in 0..num_logs {
-        logs.push(new_counter(i, 100, commit_count, open_fn))
+        logs.push(new_counter(i, 100, commit_count, open_fn, open_append_fn))
     }
     logs
 }
 
-fn causal_bench_file() -> Vec<(CausalTestOrderedLog<FileSR>, TimeTest)> {
-    causal_bench_setup(FileSR::new)
+fn causal_bench_file() -> Vec<(CausalTestOrderedLog<FileSR, FileSR>, TimeTest)> {
+    causal_bench_setup(FileSR::new, FileSR::new)
 }
 
-fn causal_bench_mem() -> Vec<(CausalTestOrderedLog<CursorSR>, TimeTest)> {
-    causal_bench_setup(|_| CursorSR::new())
+fn causal_bench_mem() -> Vec<(CausalTestOrderedLog<CursorSR, CursorSR>, TimeTest)> {
+    causal_bench_setup(|_| CursorSR::new(), |_| CursorSR::new())
 }
 
-fn causal_bench_buf() -> Vec<(CausalTestOrderedLog<RWBuf<File>>, TimeTest)> {
-    causal_bench_setup(RWBuf::new)
+fn causal_bench_buf() -> Vec<(CausalTestOrderedLog<RWBuf<File>, RWBuf<File>>, TimeTest)> {
+    causal_bench_setup(RWBuf::new, RWBuf::new)
 }
 
-fn causal_bench_setup<F: RWS, G: Fn(File) -> F + Copy>(
+fn causal_bench_setup<
+    F: RWS,
+    AppendF: RWS,
+    G: Fn(File) -> F + Copy,
+    AppendG: Fn(File) -> AppendF + Copy,
+>(
     open_fn: G,
-) -> Vec<(CausalTestOrderedLog<F>, TimeTest)> {
+    open_append_fn: AppendG,
+) -> Vec<(CausalTestOrderedLog<F, AppendF>, TimeTest)> {
     let num_logs = 4;
     let commit_count = 3;
     let mut logs = vec![];
     for i in 0..num_logs {
-        logs.push(new_causal_test(i, 100, commit_count, open_fn))
+        logs.push(new_causal_test(
+            i,
+            100,
+            commit_count,
+            open_fn,
+            open_append_fn,
+        ))
     }
     logs
 }
@@ -119,7 +145,7 @@ fn run_ordered_rand_bench<L: OrderedLog, S: OrderedState + OrderedStateTest>(
     logs
 }
 
-fn run_bench<F: RWS>(mut logs: Vec<LogTest<F>>) -> Vec<LogTest<F>> {
+fn run_bench<F: RWS, AppendF: RWS>(mut logs: Vec<LogTest<F, AppendF>>) -> Vec<LogTest<F, AppendF>> {
     // input the logs so their initialization is not timed
     let mut rng = StdRng::seed_from_u64(100);
     for i in 1..3 {

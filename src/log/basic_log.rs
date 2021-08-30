@@ -1,7 +1,6 @@
 use bincode::DefaultOptions;
 use log::debug;
-use std::cell::{Ref, RefCell};
-use std::ops::Deref;
+use std::cell::RefCell;
 use std::{cmp::Ordering, rc::Rc};
 use verification::{hash, TimeCheck, TimeInfo};
 
@@ -10,6 +9,7 @@ use crate::{
     verification::{self, Id},
 };
 
+use super::entry::StrongPtr;
 use super::{
     entry::{
         set_to_pointers_append_to_log, LogEntry, LogEntryStrong, LogEntryWeak, LogIterator,
@@ -23,24 +23,12 @@ use super::{
 };
 use super::{hash_items::HashItems, sp::Sp};
 
-struct PrevEntryHolder<'a> {
-    prv_entry: Ref<'a, LogEntry>,
-}
-
-impl<'a> Deref for PrevEntryHolder<'a> {
-    type Target = PrevEntry;
-
-    fn deref(&self) -> &PrevEntry {
-        &self.prv_entry.entry
-    }
-}
-
-struct SpLocalTotalOrderIterator<'a, F: RWS> {
+struct SpLocalTotalOrderIterator<'a, F: RWS, AppendF: RWS> {
     id: Id,
-    iter: TotalOrderIterator<'a, F>,
+    iter: TotalOrderIterator<'a, F, AppendF>,
 }
 
-impl<'a, F: RWS> Iterator for SpLocalTotalOrderIterator<'a, F> {
+impl<'a, F: RWS, AppendF: RWS> Iterator for SpLocalTotalOrderIterator<'a, F, AppendF> {
     type Item = StrongPtrIdx;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -62,7 +50,10 @@ enum LogItems {
 }
 
 impl LogItems {
-    fn log_iterator_from_end<'a, F: RWS>(&self, state: &'a LogState<F>) -> LogIterator<'a, F> {
+    fn log_iterator_from_end<'a, F: RWS, AppendF: RWS>(
+        &self,
+        state: &'a LogState<F, AppendF>,
+    ) -> LogIterator<'a, F, AppendF> {
         LogIterator::new(
             match self {
                 LogItems::Empty => None,
@@ -74,13 +65,20 @@ impl LogItems {
         )
     }
 
-    fn add_item<F: RWS>(
+    /// Add the item to the append only log.
+    /// Compute the previous pointers.
+    /// Cache the item in memory
+    fn add_item<F: RWS, AppendF: RWS>(
         &mut self,
         idx: u64,
         file_idx: u64,
         entry: PrevEntry,
-        state: &LogState<F>,
-    ) -> (StrongPtrIdx, StrongPointers) {
+        state: &LogState<F, AppendF>,
+    ) -> Result<(StrongPtrIdx, StrongPointers)> {
+        // First write just the entry to the append only log
+        let mut append_f = state.append_f.borrow_mut();
+        let append_info = append_f.append_log(&entry)?;
+
         let prv = match self {
             LogItems::Empty => None,
             LogItems::Single(si) => Some(si.entry.clone()), // Rc::clone(&si.entry)),
@@ -89,6 +87,7 @@ impl LogItems {
         let log_entry = LogEntry {
             log_index: idx,
             file_index: file_idx,
+            append_file_index: append_info.start_location,
             log_pointers: LogPointers {
                 next_entry: None,
                 prev_entry: prv.clone(),
@@ -98,7 +97,7 @@ impl LogItems {
                 prev_to: None,
             },
             entry,
-            ser_size: None, // this will be updated once serialized
+            ser_size: append_info.bytes_consumed,
         };
         let new_entry = Rc::new(RefCell::new(log_entry));
 
@@ -136,16 +135,16 @@ impl LogItems {
             debug!("dropped item at log index {}", replaced);
         }
 
-        (
+        Ok((
             new_entry_keep,
             StrongPointers {
                 prev: prv.map(|p| p.to_strong_ptr_idx(state)),
                 next: None,
             },
-        )
+        ))
     }
 
-    fn get_last<F: RWS>(&self, state: &LogState<F>) -> Option<StrongPtrIdx> {
+    fn get_last<F: RWS, AppendF: RWS>(&self, state: &LogState<F, AppendF>) -> Option<StrongPtrIdx> {
         match self {
             LogItems::Empty => None,
             LogItems::Single(si) => Some(si.entry.to_strong_ptr_idx(state)),
@@ -153,7 +152,10 @@ impl LogItems {
         }
     }
 
-    fn get_first<F: RWS>(&self, state: &LogState<F>) -> Option<StrongPtrIdx> {
+    fn get_first<F: RWS, AppendF: RWS>(
+        &self,
+        state: &LogState<F, AppendF>,
+    ) -> Option<StrongPtrIdx> {
         match self {
             LogItems::Empty => None,
             LogItems::Single(si) => Some(si.entry.to_strong_ptr_idx(state)),
@@ -171,7 +173,7 @@ struct LogMultiple {
     first_entry: LogEntryWeak,
 }
 
-pub struct Log<F: RWS> {
+pub struct Log<F: RWS, AppendF: RWS> {
     index: u64,
     first_last: LogItems,
     last_op_total_order: Option<LogEntryWeak>,
@@ -180,20 +182,59 @@ pub struct Log<F: RWS> {
     init_hash: verification::Hash,
     init_sp: Option<LogEntryWeak>,
     init_sp_entry_info: EntryInfo,
-    state: LogState<F>,
+    state: LogState<F, AppendF>,
 }
 
-pub struct LogState<F: RWS> {
+pub struct LogState<F: RWS, AppendF: RWS> {
     pub f: RefCell<LogFile<F>>,
-    pub m: RefCell<HashItems<LogEntry>>, // log entries in memory by their log file index
+    pub append_f: RefCell<LogFile<AppendF>>,
+    pub m: RefCell<HashItems<LogEntry>>, // log entries in memory by their log file index (i.e. location in bytes from file start of 0)
 }
 
-impl<F: RWS> Drop for Log<F> {
+impl<F: RWS, AppendF: RWS> LogState<F, AppendF> {
+    /// Clears the cached entries in memory.
+    pub fn clear_mem(&self) {
+        self.m.borrow_mut().clear()
+    }
+
+    /// Drops the oldest log entry from memory.
+    fn drop_entry(&self) -> Option<Rc<RefCell<LogEntry>>> {
+        self.m.borrow_mut().drop_entry()
+    }
+
+    /// Loads the item at file_idx from memory if available, otherwise the disk
+    pub fn get_ptr(&self, file_idx: u64) -> StrongPtr {
+        // check the map
+        let entry = self.m.borrow().get(file_idx);
+        match entry {
+            Some(entry) => entry,
+            None => {
+                // the entry must be loaded from the file
+                debug!("load from disk at idx {}", file_idx);
+                let entry = Rc::new(RefCell::new(
+                    LogEntry::from_file(file_idx, self).expect("unable to load entry from file"),
+                ));
+                let ptr = Rc::clone(&entry);
+                if self
+                    .m
+                    .borrow_mut()
+                    .store_from_disk(file_idx, entry)
+                    .is_some()
+                {
+                    panic!("found unexpected entry at file index");
+                }
+                ptr
+            }
+        }
+    }
+}
+
+impl<F: RWS, AppendF: RWS> Drop for Log<F, AppendF> {
     fn drop(&mut self) {}
 }
 
-impl<F: RWS> Log<F> {
-    pub fn new(log_file: LogFile<F>) -> Log<F> {
+impl<F: RWS, AppendF: RWS> Log<F, AppendF> {
+    pub fn new(log_file: LogFile<F>, append_file: LogFile<AppendF>) -> Log<F, AppendF> {
         let mut l = Log {
             index: 0,
             first_last: LogItems::Empty,
@@ -206,6 +247,7 @@ impl<F: RWS> Log<F> {
             init_sp_entry_info: EntryInfo::default(),
             state: LogState {
                 f: RefCell::new(log_file),
+                append_f: RefCell::new(append_file),
                 m: RefCell::new(HashItems::default()),
             },
         };
@@ -231,7 +273,7 @@ impl<F: RWS> Log<F> {
     }
 
     #[inline(always)]
-    pub(crate) fn get_log_state(&self) -> &LogState<F> {
+    pub(crate) fn get_log_state(&self) -> &LogState<F, AppendF> {
         &self.state
     }
 
@@ -327,21 +369,19 @@ impl<F: RWS> Log<F> {
     fn drop_first(&mut self) -> Result<StrongPtrIdx> {
         // self.first_last.drop_first(&self.state)
         self.state
-            .m
-            .borrow_mut()
             .drop_entry()
             .map(|e| (&e).into())
             .ok_or(LogError::OpAlreadyDropped)
     }
 
-    fn sp_local_total_order_iterator(&self, id: Id) -> SpLocalTotalOrderIterator<F> {
+    fn sp_local_total_order_iterator(&self, id: Id) -> SpLocalTotalOrderIterator<F, AppendF> {
         SpLocalTotalOrderIterator {
             id,
             iter: self.sp_total_order_iterator(),
         }
     }
 
-    fn sp_total_order_iterator_from(&self, sp: LogEntryStrong) -> TotalOrderIterator<F> {
+    fn sp_total_order_iterator_from(&self, sp: LogEntryStrong) -> TotalOrderIterator<F, AppendF> {
         TotalOrderIterator {
             prev_entry: Some(sp),
             forward: false,
@@ -349,7 +389,7 @@ impl<F: RWS> Log<F> {
         }
     }
 
-    fn sp_total_order_iterator(&self) -> TotalOrderIterator<F> {
+    fn sp_total_order_iterator(&self) -> TotalOrderIterator<F, AppendF> {
         TotalOrderIterator {
             prev_entry: match &self.last_sp_total_order {
                 None => None,
@@ -360,7 +400,7 @@ impl<F: RWS> Log<F> {
         }
     }
 
-    pub fn op_total_order_iterator_from_last(&self) -> TotalOrderIterator<F> {
+    pub fn op_total_order_iterator_from_last(&self) -> TotalOrderIterator<F, AppendF> {
         TotalOrderIterator {
             prev_entry: match &self.last_op_total_order {
                 None => None,
@@ -371,7 +411,7 @@ impl<F: RWS> Log<F> {
         }
     }
 
-    pub fn op_total_order_iterator_from_first(&mut self) -> TotalOrderIterator<F> {
+    pub fn op_total_order_iterator_from_first(&mut self) -> TotalOrderIterator<F, AppendF> {
         TotalOrderIterator {
             prev_entry: match &self.first_op_to {
                 None => None,
@@ -386,17 +426,21 @@ impl<F: RWS> Log<F> {
         &mut self,
         entry: LogEntryStrong,
         forward: bool,
-    ) -> LogOpIterator<F> {
+    ) -> LogOpIterator<F, AppendF> {
         let i = self.log_iterator_from(entry, forward);
         LogOpIterator::new(i)
     }
 
-    fn log_iterator_from(&mut self, mut entry: LogEntryStrong, forward: bool) -> LogIterator<F> {
+    fn log_iterator_from(
+        &mut self,
+        mut entry: LogEntryStrong,
+        forward: bool,
+    ) -> LogIterator<F, AppendF> {
         let prv_entry = Some(entry.strong_ptr_idx(&self.state));
         LogIterator::new(prv_entry, &self.state, forward)
     }
 
-    fn log_iterator_from_end(&self) -> LogIterator<F> {
+    fn log_iterator_from_end(&self) -> LogIterator<F, AppendF> {
         self.first_last.log_iterator_from_end(&self.state)
     }
 
@@ -489,7 +533,9 @@ impl<F: RWS> Log<F> {
         )
     }
 
-    fn add_to_log(&mut self, entry: PrevEntry) -> (StrongPtrIdx, StrongPointers) {
+    /// Compute log meta-data for the item and cache in memory.
+    /// Also add to append only log.
+    fn prepare_for_log(&mut self, entry: PrevEntry) -> Result<(StrongPtrIdx, StrongPointers)> {
         self.index += 1;
         // file_index is where the item will be written in the file
         let file_index = self.state.f.borrow().get_end_index();
@@ -503,8 +549,8 @@ impl<F: RWS> Log<F> {
     pub fn insert_outer_sp(&mut self, sp: OuterSp) -> Result<StrongPtrIdx> {
         debug!("\nInsert new Sp {:?}\n", sp);
         let entry = PrevEntry::Sp(sp);
-        // add the sp to the log
-        let (new_sp_ref, log_pointers) = self.add_to_log(entry);
+        // prepare the sp for the log
+        let (new_sp_ref, _log_pointers) = self.prepare_for_log(entry)?;
         // put the new sp in the total ordered list of sp
         let mut to_pointers = StrongPointers::default();
         for nxt in self.sp_total_order_iterator() {
@@ -516,7 +562,7 @@ impl<F: RWS> Log<F> {
             }
         }
         // update the pointers and insert into the log file
-        set_to_pointers_append_to_log(&to_pointers, &log_pointers, &new_sp_ref, &self.state);
+        set_to_pointers_append_to_log(&to_pointers, &new_sp_ref, &self.state);
 
         // update the last sp total order pointer if necessary
         self.last_sp_total_order = match self.last_sp_total_order.take() {
@@ -566,12 +612,12 @@ impl<F: RWS> Log<F> {
             include_in_hash,
             arrived_late,
         });
-        // add the op to the log
+        // prepare the op for the log
         let ei = outer_op.get_entry_info();
-        let (new_op_ref, log_pointers) = self.add_to_log(outer_op);
+        let (new_op_ref, _log_pointers) = self.prepare_for_log(outer_op)?;
 
         // update the total order pointers, and append to the log file
-        set_to_pointers_append_to_log(&to_pointers, &log_pointers, &new_op_ref, &self.state);
+        set_to_pointers_append_to_log(&to_pointers, &new_op_ref, &self.state);
 
         // see if need to set the op as the first op in the log
         match self.first_op_to.as_ref() {
@@ -614,7 +660,7 @@ pub mod test_fns {
     use crate::log::log_error::LogError;
     use crate::rw_buf::RWS;
 
-    pub fn print_log_from_end<F: RWS>(l: &mut Log<F>) {
+    pub fn print_log_from_end<F: RWS, AppendF: RWS>(l: &mut Log<F, AppendF>) {
         let iter = l.log_iterator_from_end();
         for nxt in iter {
             debug!("{:?}", nxt.ptr.borrow());
@@ -622,7 +668,7 @@ pub mod test_fns {
     }
 
     /// Goes through each SP and verifies its supported log index corresponds correctly to the supported hash.
-    pub fn check_sp_prev<F: RWS>(l: &mut Log<F>, check_last_op: bool) {
+    pub fn check_sp_prev<F: RWS, AppendF: RWS>(l: &mut Log<F, AppendF>, check_last_op: bool) {
         let mut to_check = vec![];
         for sp in l.sp_total_order_iterator() {
             let sp_ref = sp.ptr.as_ref();
@@ -703,20 +749,26 @@ pub(crate) mod tests {
     use super::test_fns::check_sp_prev;
     use super::*;
 
-    fn get_log_file_direct(idx: usize) -> LogFile<FileSR> {
-        open_log_file(
-            &format!("log_files/basic_log{}.log", idx),
-            true,
-            FileSR::new,
-        )
-        .unwrap()
+    fn get_log_file_direct(idx: usize, append: bool) -> LogFile<FileSR> {
+        let path_string = match append {
+            true => format!("log_files/basic_append_log{}.log", idx),
+            false => format!("log_files/basic_log{}.log", idx),
+        };
+        open_log_file(&path_string, true, append, FileSR::new).unwrap()
     }
 
-    fn get_log_file(idx: usize) -> LogFile<RWBuf<File>> {
-        open_log_file(&format!("log_files/basic_log{}.log", idx), true, RWBuf::new).unwrap()
+    fn get_log_file(idx: usize, append: bool) -> LogFile<RWBuf<File>> {
+        let path_string = match append {
+            true => format!("log_files/basic_append_log{}.log", idx),
+            false => format!("log_files/basic_log{}.log", idx),
+        };
+        open_log_file(&path_string, true, append, RWBuf::new).unwrap()
     }
 
-    fn check_iter_total_order<T: Iterator<Item = StrongPtrIdx>, F: RWS>(i: T, state: &LogState<F>) {
+    fn check_iter_total_order<T: Iterator<Item = StrongPtrIdx>, F: RWS, AppendF: RWS>(
+        i: T,
+        state: &LogState<F, AppendF>,
+    ) {
         for op in i {
             // check we have the right pointers for the log
             if let Some(mut prv) = op.ptr.as_ref().borrow().to_pointers.get_prev_to_strong() {
@@ -745,7 +797,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn check_log_indicies<F: RWS>(l: &mut Log<F>) {
+    fn check_log_indicies<F: RWS, AppendF: RWS>(l: &mut Log<F, AppendF>) {
         check_iter_total_order(l.op_total_order_iterator_from_last(), l.get_log_state()); // check we have the right pointers for the ops in the log
         check_iter_total_order(l.sp_total_order_iterator(), l.get_log_state()); // check we have the right pointers for the sps in log
                                                                                 // check the log entry pointers
@@ -777,7 +829,7 @@ pub(crate) mod tests {
     #[test]
     fn add_op() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(0));
+        let mut l = Log::new(get_log_file(0, false), get_log_file(0, true));
         for _ in 0..5 {
             let _ = l.insert_op(Op::new(1, gen_rand_data(), &mut ti), &ti);
             check_log_indicies(&mut l);
@@ -794,7 +846,7 @@ pub(crate) mod tests {
     #[test]
     fn duplicate_op() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(1));
+        let mut l = Log::new(get_log_file(1, false), get_log_file(1, true));
         let id = 1;
         let op1 = Op::new(id, gen_rand_data(), &mut ti);
         let op1_copy = op1.clone();
@@ -811,7 +863,7 @@ pub(crate) mod tests {
     #[test]
     fn drop_op() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(2));
+        let mut l = Log::new(get_log_file(2, false), get_log_file(2, true));
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let op_count = 5;
         for _ in 0..op_count {
@@ -857,7 +909,7 @@ pub(crate) mod tests {
     #[test]
     fn op_iterator() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(3));
+        let mut l = Log::new(get_log_file(3, false), get_log_file(3, true));
         let op1 = OpState::new(1, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let op2 = OpState::new(2, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let op3 = OpState::new(3, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
@@ -943,7 +995,7 @@ pub(crate) mod tests {
     #[test]
     fn add_sp() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(4));
+        let mut l = Log::new(get_log_file(4, false), get_log_file(4, true));
         let num_sp = 5;
         let id = 1;
         // let mut prev_sp_info = l.get_initial_entry_info();
@@ -986,7 +1038,7 @@ pub(crate) mod tests {
     #[test]
     fn drop_sp() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(5));
+        let mut l = Log::new(get_log_file(5, false), get_log_file(5, true));
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let num_sp = 5;
         let id = 1;
@@ -1048,7 +1100,7 @@ pub(crate) mod tests {
     #[test]
     fn sp_iterator() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(6));
+        let mut l = Log::new(get_log_file(6, false), get_log_file(6, true));
         let mut last_sps: HashMap<Id, LogEntryWeak> = HashMap::new();
         let num_ids = 5;
         let num_sps = 5;
@@ -1164,7 +1216,7 @@ pub(crate) mod tests {
     #[test]
     fn verify_sp() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(7));
+        let mut l = Log::new(get_log_file(7, false), get_log_file(7, true));
         let num_ids = 5;
         let num_ops = 5;
         // insert some ops
@@ -1271,7 +1323,7 @@ pub(crate) mod tests {
     #[test]
     fn late_op() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(8));
+        let mut l = Log::new(get_log_file(8, false), get_log_file(8, true));
         let id = 0;
         let op1 = make_op_late(
             OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap(),
@@ -1357,7 +1409,7 @@ pub(crate) mod tests {
     #[test]
     fn unsupported_sp() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(9));
+        let mut l = Log::new(get_log_file(9, false), get_log_file(9, true));
         let num_ids = 5;
         let num_ops = 6;
         let ops = insert_ops(num_ops, num_ids, &mut l, &mut ti);
@@ -1456,7 +1508,7 @@ pub(crate) mod tests {
     #[test]
     fn no_op_sp() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(10));
+        let mut l = Log::new(get_log_file(10, false), get_log_file(10, true));
         let id = 0;
         let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let sp1 = SpState::new(
@@ -1480,7 +1532,7 @@ pub(crate) mod tests {
     #[test]
     fn exact_sp() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(11));
+        let mut l = Log::new(get_log_file(11, false), get_log_file(11, true));
         let id = 0;
         let op1 = OpState::new(id, gen_rand_data(), &mut ti, l.serialize_option()).unwrap();
         let op2 = make_op_late(
@@ -1535,10 +1587,10 @@ pub(crate) mod tests {
         check_sp_prev(&mut l, true);
     }
 
-    fn insert_ops<F: RWS>(
+    fn insert_ops<F: RWS, AppendF: RWS>(
         num_ops: usize,
         num_ids: Id,
-        l: &mut Log<F>,
+        l: &mut Log<F, AppendF>,
         ti: &mut TimeTest,
     ) -> Vec<StrongPtrIdx> {
         let mut ret = vec![];
@@ -1551,9 +1603,9 @@ pub(crate) mod tests {
         ret
     }
 
-    fn get_entry_info<F: RWS>(
+    fn get_entry_info<F: RWS, AppendF: RWS>(
         id: Id,
-        l: &mut Log<F>,
+        l: &mut Log<F, AppendF>,
         last_sps: &HashMap<Id, LogEntryWeak>,
     ) -> StrongPtr {
         match last_sps.get(&id) {
@@ -1565,7 +1617,7 @@ pub(crate) mod tests {
     #[test]
     fn drop_op_max() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(12));
+        let mut l = Log::new(get_log_file(12, false), get_log_file(12, true));
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let mut entries = VecDeque::new();
         let op_count = DEFAULT_MAX_ENTRIES + 10;
@@ -1613,7 +1665,7 @@ pub(crate) mod tests {
     #[test]
     fn load_drop_disk() {
         let mut ti = TimeTest::new();
-        let mut l = Log::new(get_log_file(13));
+        let mut l = Log::new(get_log_file(13, false), get_log_file(13, true));
         let mut entry_infos = vec![l.get_initial_entry_info()];
         let op_count = DEFAULT_MAX_ENTRIES * 4;
         for _ in 0..op_count {

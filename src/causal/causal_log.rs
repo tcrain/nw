@@ -647,19 +647,20 @@ impl<S: Supporters, D: Dependents> PendingEntries<S, D> {
 
 // (instead of support for SPs, has to be support for ops)
 
-pub struct CausalLog<F: RWS, S: Supporters, D: Dependents> {
-    l: LocalLog<F>,
+pub struct CausalLog<F: RWS, AppendF: RWS, S: Supporters, D: Dependents> {
+    l: LocalLog<F, AppendF>,
     pending_entries: PendingEntries<S, D>,
     commit_count: usize, // number of supporters needed before an op/sp is committed
 }
 
-impl<F, S, D> CausalLog<F, S, D>
+impl<F, AppendF, S, D> CausalLog<F, AppendF, S, D>
 where
     F: RWS,
+    AppendF: RWS,
     S: Supporters,
     D: Dependents,
 {
-    fn new(l: LocalLog<F>, commit_count: usize) -> Self {
+    fn new(l: LocalLog<F, AppendF>, commit_count: usize) -> Self {
         let id = l.my_id();
         CausalLog {
             l,
@@ -753,35 +754,49 @@ pub mod test_structs {
         }
     }
 
-    pub type CausalTestLog<F> = OrderedLogRun<
-        OrderedLogTest<F, PendingEntries<SupVec, DepVec>>,
+    pub type CausalTestLog<F, AppendF> = OrderedLogRun<
+        OrderedLogTest<F, AppendF, PendingEntries<SupVec, DepVec>>,
         CausalLogClock<Id, VecClock<Id, u64>>,
     >;
 
-    pub type CausalTestOrderedLog<F> = OrderedLogRun<
-        OrderedLogContainer<F, PendingEntries<SupVec, DepVec>>,
+    pub type CausalTestOrderedLog<F, AppendF> = OrderedLogRun<
+        OrderedLogContainer<F, AppendF, PendingEntries<SupVec, DepVec>>,
         CausalLogClock<Id, VecClock<Id, u64>>,
     >;
 
-    pub type CausalTestSetup<F> = (
-        LocalLog<F>,
+    pub type CausalTestSetup<F, AppendF> = (
+        LocalLog<F, AppendF>,
         CausalLogClock<Id, VecClock<Id, u64>>,
         PendingEntries<SupVec, DepVec>,
     );
 
-    fn new_causal_setup<F: RWS, G: Fn(File) -> F + Copy>(
+    fn new_causal_setup<
+        F: RWS,
+        AppendF: RWS,
+        G: Fn(File) -> F + Copy,
+        AppendG: Fn(File) -> AppendF + Copy,
+    >(
         id: Id,
         test_idx: usize,
         commit_count: usize,
         open_fn: G,
-    ) -> CausalTestSetup<F> {
+        open_append_fn: AppendG,
+    ) -> CausalTestSetup<F, AppendF> {
         let f = new_local_log(
             id,
             Log::new(
                 open_log_file(
                     &format!("log_files/causal_log{}_{}.log", test_idx, id),
                     true,
+                    false,
                     open_fn,
+                )
+                .unwrap(),
+                open_log_file(
+                    &format!("log_files/causal_append_log{}_{}.log", test_idx, id),
+                    true,
+                    true,
+                    open_append_fn,
                 )
                 .unwrap(),
             ),
@@ -797,24 +812,36 @@ pub mod test_structs {
         (f, c, pe)
     }
 
-    pub(crate) fn new_causal_ordered_test<F: RWS, G: Fn(File) -> F + Copy>(
+    pub(crate) fn new_causal_ordered_test<
+        F: RWS,
+        AppendF: RWS,
+        G: Fn(File) -> F + Copy,
+        AppendG: Fn(File) -> AppendF + Copy,
+    >(
         id: Id,
         test_idx: usize,
         commit_count: usize,
         open_fn: G,
-    ) -> (CausalTestLog<F>, TimeTest) {
-        let (f, c, pe) = new_causal_setup(id, test_idx, commit_count, open_fn);
+        open_append_fn: AppendG,
+    ) -> (CausalTestLog<F, AppendF>, TimeTest) {
+        let (f, c, pe) = new_causal_setup(id, test_idx, commit_count, open_fn, open_append_fn);
         let l = OrderedLogTest::new(OrderedLogContainer::new(f, pe));
         (OrderedLogRun::new(id, l, c), TimeTest::new())
     }
 
-    pub fn new_causal_test<F: RWS, G: Fn(File) -> F + Copy>(
+    pub fn new_causal_test<
+        F: RWS,
+        AppendF: RWS,
+        G: Fn(File) -> F + Copy,
+        AppendG: Fn(File) -> AppendF + Copy,
+    >(
         id: Id,
         test_idx: usize,
         commit_count: usize,
         open_fn: G,
-    ) -> (CausalTestOrderedLog<F>, TimeTest) {
-        let (f, c, pe) = new_causal_setup(id, test_idx, commit_count, open_fn);
+        open_append_fn: AppendG,
+    ) -> (CausalTestOrderedLog<F, AppendF>, TimeTest) {
+        let (f, c, pe) = new_causal_setup(id, test_idx, commit_count, open_fn, open_append_fn);
         let l = OrderedLogContainer::new(f, pe);
         (OrderedLogRun::new(id, l, c), TimeTest::new())
     }
@@ -850,6 +877,7 @@ mod test {
                 id as usize,
                 commit_count,
                 RWBuf::new,
+                RWBuf::new,
             ));
         }
         run_ordered_once(&mut logs);
@@ -868,6 +896,7 @@ mod test {
                             id,
                             100 + id as usize,
                             commit_count,
+                            RWBuf::new,
                             RWBuf::new,
                         ));
                     }
@@ -894,6 +923,7 @@ mod test {
                             200 + id as usize,
                             commit_count,
                             RWBuf::new,
+                            RWBuf::new,
                         ));
                     }
                     run_ordered_standard(&mut logs, num_ops, num_iterations, seed);
@@ -905,7 +935,7 @@ mod test {
         debug!("test took {:?}", start.elapsed());
     }
 
-    fn check_logs<F: RWS>(logs: &mut [(CausalTestLog<F>, TimeTest)]) {
+    fn check_logs<F: RWS, AppendF: RWS>(logs: &mut [(CausalTestLog<F, AppendF>, TimeTest)]) {
         for (i, (l, _)) in logs.iter_mut().enumerate() {
             debug!(
                 "\nPending entries in log {}: {:?}\n",
